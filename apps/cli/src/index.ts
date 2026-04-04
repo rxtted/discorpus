@@ -44,7 +44,7 @@ async function runCollect(layer: CollectLayer, channel: ReleaseChannel): Promise
   if (layer === "desktop") {
     desktopInstall = await requireDesktopInstall(channel);
     desktopManifest = await collectWindowsDesktopManifest(desktopInstall);
-    signals = collectDesktopSignals(desktopInstall);
+    signals = collectDesktopSignals(desktopInstall, desktopManifest);
   } else {
     signals = [
       {
@@ -75,15 +75,36 @@ async function runCollect(layer: CollectLayer, channel: ReleaseChannel): Promise
   console.log(`status: ${layer} collection ${layer === "desktop" ? "discovery" : "stub"} ready`);
 }
 
-function collectDesktopSignals(install: WindowsDesktopInstall): VersionSignal[] {
-  const signals: VersionSignal[] = [
-    {
+function collectDesktopSignals(
+  install: WindowsDesktopInstall,
+  manifest: WindowsDesktopManifest,
+): VersionSignal[] {
+  const signals: VersionSignal[] = [];
+
+  if (manifest.buildInfo?.version) {
+    signals.push({
       scope: "desktop",
-      name: "root_dir",
-      value: install.rootDir,
+      name: "build_info_version",
+      value: manifest.buildInfo.version,
       confidence: "high",
-    },
-  ];
+    });
+  }
+
+  if (manifest.buildInfo?.releaseChannel) {
+    signals.push({
+      scope: "desktop",
+      name: "build_info_channel",
+      value: manifest.buildInfo.releaseChannel,
+      confidence: "high",
+    });
+  }
+
+  signals.push({
+    scope: "desktop",
+    name: "root_dir",
+    value: install.rootDir,
+    confidence: "medium",
+  });
 
   for (const version of install.installedVersions) {
     signals.push({
@@ -99,7 +120,7 @@ function collectDesktopSignals(install: WindowsDesktopInstall): VersionSignal[] 
       scope: "desktop",
       name: "current_app_dir",
       value: install.currentAppDir,
-      confidence: "high",
+      confidence: "medium",
     });
   }
 
@@ -109,6 +130,15 @@ function collectDesktopSignals(install: WindowsDesktopInstall): VersionSignal[] 
       name: "app_asar_path",
       value: install.appAsarPath,
       confidence: "high",
+    });
+  }
+
+  for (const moduleName of Object.keys(manifest.moduleManifests).sort()) {
+    signals.push({
+      scope: "desktop",
+      name: "bootstrap_module",
+      value: moduleName,
+      confidence: "medium",
     });
   }
 
@@ -163,6 +193,14 @@ function printDesktopManifest(
 
   console.log(`desktop artifact count: ${records.length}`);
   console.log(`desktop artifact kinds: ${formatArtifactCounts(counts)}`);
+  if (manifest.buildInfo) {
+    console.log(`desktop build info version: ${manifest.buildInfo.version ?? "none"}`);
+    console.log(`desktop build info channel: ${manifest.buildInfo.releaseChannel ?? "none"}`);
+    console.log(`desktop new updater: ${String(manifest.buildInfo.newUpdater ?? false)}`);
+  }
+  const bootstrapModules = Object.keys(manifest.bootstrapManifest ?? {}).sort();
+  console.log(`desktop bootstrap modules: ${bootstrapModules.join(", ") || "none"}`);
+  console.log(`desktop module manifests: ${Object.keys(manifest.moduleManifests).sort().join(", ") || "none"}`);
 
   for (const artifact of importantArtifacts.slice(0, 12)) {
     console.log(`artifact ${artifact.kind}: ${artifact.path} ${artifact.sha256}`);

@@ -4,6 +4,12 @@ import path from "node:path";
 
 import type { ReleaseChannel } from "@discorpus/core";
 
+interface BuildInfo {
+  newUpdater?: boolean;
+  releaseChannel?: string;
+  version?: string;
+}
+
 export interface WindowsDesktopInstall {
   channel: ReleaseChannel;
   rootDir: string;
@@ -25,6 +31,9 @@ export interface WindowsDesktopArtifact {
 
 export interface WindowsDesktopManifest {
   install: WindowsDesktopInstall;
+  buildInfo: BuildInfo | null;
+  bootstrapManifest: Record<string, number> | null;
+  moduleManifests: Record<string, Record<string, unknown>>;
   artifacts: WindowsDesktopArtifact[];
 }
 
@@ -85,6 +94,13 @@ export async function collectWindowsDesktopManifest(
   install: WindowsDesktopInstall,
 ): Promise<WindowsDesktopManifest> {
   const paths = new Set<string>();
+  const buildInfoPath = install.resourcesDir
+    ? path.join(install.resourcesDir, "build_info.json")
+    : null;
+  const bootstrapManifestPath = install.resourcesDir
+    ? path.join(install.resourcesDir, "bootstrap", "manifest.json")
+    : null;
+  const packagesDir = path.join(install.rootDir, "packages");
 
   if (install.updateExePath) {
     paths.add(install.updateExePath);
@@ -94,6 +110,14 @@ export async function collectWindowsDesktopManifest(
     const appPaths = await walkFiles(install.currentAppDir);
 
     for (const value of appPaths) {
+      paths.add(value);
+    }
+  }
+
+  if (await pathExists(packagesDir)) {
+    const packagePaths = await walkFiles(packagesDir);
+
+    for (const value of packagePaths) {
       paths.add(value);
     }
   }
@@ -113,8 +137,17 @@ export async function collectWindowsDesktopManifest(
     }),
   );
 
+  const buildInfo = buildInfoPath ? await readJsonFile<BuildInfo>(buildInfoPath) : null;
+  const bootstrapManifest = bootstrapManifestPath
+    ? await readJsonFile<Record<string, number>>(bootstrapManifestPath)
+    : null;
+  const moduleManifests = await collectModuleManifests(install);
+
   return {
     install,
+    buildInfo,
+    bootstrapManifest,
+    moduleManifests,
     artifacts,
   };
 }
@@ -147,6 +180,44 @@ async function walkFiles(rootDir: string): Promise<string[]> {
   }
 
   return files;
+}
+
+async function collectModuleManifests(
+  install: WindowsDesktopInstall,
+): Promise<Record<string, Record<string, unknown>>> {
+  const modulesDir = install.currentAppDir
+    ? path.join(install.currentAppDir, "modules")
+    : null;
+
+  if (!modulesDir || !(await pathExists(modulesDir))) {
+    return {};
+  }
+
+  const entries = await readdir(modulesDir, { withFileTypes: true });
+  const manifests: Record<string, Record<string, unknown>> = {};
+
+  for (const entry of entries) {
+    if (!entry.isDirectory()) {
+      continue;
+    }
+
+    const moduleRoot = path.join(modulesDir, entry.name);
+    const children = await readdir(moduleRoot, { withFileTypes: true });
+    const payloadDir = children.find((child) => child.isDirectory());
+
+    if (!payloadDir) {
+      continue;
+    }
+
+    const manifestPath = path.join(moduleRoot, payloadDir.name, "manifest.json");
+    const manifest = await readJsonFile<Record<string, unknown>>(manifestPath);
+
+    if (manifest) {
+      manifests[entry.name] = manifest;
+    }
+  }
+
+  return manifests;
 }
 
 function compareAppDirs(left: string, right: string): number {
@@ -193,6 +264,14 @@ function classifyArtifact(filePath: string, install: WindowsDesktopInstall): str
     return "updater";
   }
 
+  if (filePath.endsWith(".nupkg")) {
+    return "update_package";
+  }
+
+  if (path.basename(filePath) === "RELEASES") {
+    return "update_releases";
+  }
+
   if (install.executablePath && filePath === install.executablePath) {
     return "desktop_executable";
   }
@@ -205,6 +284,26 @@ function classifyArtifact(filePath: string, install: WindowsDesktopInstall): str
     return "dll";
   }
 
+  if (filePath.endsWith(".node")) {
+    return "native_module";
+  }
+
+  if (filePath.endsWith(".asar")) {
+    return "module_asar";
+  }
+
+  if (path.basename(filePath) === "manifest.json") {
+    return "module_manifest";
+  }
+
+  if (path.basename(filePath) === "package.json") {
+    return "module_package";
+  }
+
+  if (filePath.endsWith(".exe")) {
+    return "helper_executable";
+  }
+
   if (filePath.includes(`${path.sep}locales${path.sep}`)) {
     return "locale";
   }
@@ -215,6 +314,14 @@ function classifyArtifact(filePath: string, install: WindowsDesktopInstall): str
 
   if (filePath.endsWith(".bin") || filePath.endsWith(".dat")) {
     return "runtime_blob";
+  }
+
+  if (filePath.endsWith(".tflite") || filePath.endsWith(".kef")) {
+    return "model_asset";
+  }
+
+  if (filePath.endsWith(".log")) {
+    return "runtime_log";
   }
 
   return "file";
@@ -238,5 +345,18 @@ async function pathExists(value: string): Promise<boolean> {
     return true;
   } catch {
     return false;
+  }
+}
+
+async function readJsonFile<T>(filePath: string): Promise<T | null> {
+  if (!(await pathExists(filePath))) {
+    return null;
+  }
+
+  try {
+    const content = await readFile(filePath, "utf8");
+    return JSON.parse(content) as T;
+  } catch {
+    return null;
   }
 }
