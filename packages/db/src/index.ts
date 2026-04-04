@@ -14,6 +14,26 @@ export interface IndexedVersionSet {
   upstreamVersion: UpstreamVersionRecord;
 }
 
+export interface LatestSnapshotRow {
+  app_version: string | null;
+  channel: string;
+  corpus_version_id: string;
+  id: string;
+  is_new_corpus_version: number;
+  is_new_upstream_version: number;
+  layer: string;
+  observed_at: string;
+  platform: string;
+  release_id: string | null;
+  target: string;
+  upstream_version_id: string;
+}
+
+export interface ArtifactKindCountRow {
+  count: number;
+  kind: string;
+}
+
 export async function ensureCorpusDatabase(baseDir: string): Promise<DbPaths> {
   await mkdir(baseDir, { recursive: true });
 
@@ -49,6 +69,61 @@ export function indexSnapshot(
   } catch (error) {
     database.exec("rollback");
     throw error;
+  } finally {
+    database.close();
+  }
+}
+
+export function getLatestSnapshot(
+  databasePath: string,
+  channel: string,
+  layer: string,
+): LatestSnapshotRow | null {
+  const database = new DatabaseSync(databasePath);
+
+  try {
+    const row = database.prepare(`
+      select
+        id,
+        target,
+        channel,
+        platform,
+        layer,
+        observed_at,
+        app_version,
+        release_id,
+        upstream_version_id,
+        corpus_version_id,
+        is_new_upstream_version,
+        is_new_corpus_version
+      from snapshots
+      where channel = ? and layer = ?
+      order by observed_at desc
+      limit 1
+    `).get(channel, layer);
+
+    return ((row as unknown) as LatestSnapshotRow | undefined) ?? null;
+  } finally {
+    database.close();
+  }
+}
+
+export function getArtifactKindCounts(
+  databasePath: string,
+  snapshotId: string,
+): ArtifactKindCountRow[] {
+  const database = new DatabaseSync(databasePath);
+
+  try {
+    const rows = database.prepare(`
+      select kind, count(*) as count
+      from artifacts
+      where snapshot_id = ?
+      group by kind
+      order by kind asc
+    `).all(snapshotId);
+
+    return (rows as unknown) as ArtifactKindCountRow[];
   } finally {
     database.close();
   }

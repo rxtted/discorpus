@@ -1,7 +1,7 @@
 import path from "node:path";
 
 import { formatSnapshotKey, type CorpusLayer, type ReleaseChannel, type VersionSignal } from "@discorpus/core";
-import { ensureCorpusDatabase, indexSnapshot } from "@discorpus/db";
+import { ensureCorpusDatabase, getArtifactKindCounts, getLatestSnapshot, indexSnapshot } from "@discorpus/db";
 import {
   collectWindowsDesktopManifest,
   discoverWindowsDesktopInstall,
@@ -17,22 +17,39 @@ type CollectLayer = Extract<CorpusLayer, "desktop" | "web">;
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
 
-  if (args[0] !== "collect") {
+  if (args[0] === "collect") {
+    const layer = parseLayer(args[1]);
+    const channel = parseChannel(args.slice(2));
+
+    if (!layer || !channel) {
+      printUsage();
+      process.exitCode = 1;
+      return;
+    }
+
+    await runCollect(layer, channel);
+    return;
+  }
+
+  if (args[0] === "inspect" && args[1] === "latest") {
+    const layer = parseLayerFromOption(args.slice(2));
+    const channel = parseChannel(args.slice(2));
+
+    if (!layer || !channel) {
+      printUsage();
+      process.exitCode = 1;
+      return;
+    }
+
+    await runInspectLatest(layer, channel);
+    return;
+  }
+
+  {
     printUsage();
     process.exitCode = 1;
     return;
   }
-
-  const layer = parseLayer(args[1]);
-  const channel = parseChannel(args.slice(2));
-
-  if (!layer || !channel) {
-    printUsage();
-    process.exitCode = 1;
-    return;
-  }
-
-  await runCollect(layer, channel);
 }
 
 async function runCollect(layer: CollectLayer, channel: ReleaseChannel): Promise<void> {
@@ -86,6 +103,35 @@ async function runCollect(layer: CollectLayer, channel: ReleaseChannel): Promise
     console.log(`sqlite db: ${dbPath}`);
   }
   console.log(`status: ${layer} collection ${layer === "desktop" ? "discovery" : "stub"} ready`);
+}
+
+async function runInspectLatest(layer: CollectLayer, channel: ReleaseChannel): Promise<void> {
+  const db = await ensureCorpusDatabase(path.join(process.cwd(), "data"));
+  const snapshot = getLatestSnapshot(db.databasePath, channel, layer);
+
+  if (!snapshot) {
+    console.error(`no indexed snapshot found for channel ${channel} and layer ${layer}`);
+    process.exitCode = 1;
+    return;
+  }
+
+  const counts = getArtifactKindCounts(db.databasePath, snapshot.id);
+
+  console.log("discorpus");
+  console.log(`command: inspect latest --channel ${channel} --layer ${layer}`);
+  console.log(`snapshot id: ${snapshot.id}`);
+  console.log(`target: ${snapshot.target}`);
+  console.log(`channel: ${snapshot.channel}`);
+  console.log(`platform: ${snapshot.platform}`);
+  console.log(`layer: ${snapshot.layer}`);
+  console.log(`observed at: ${snapshot.observed_at}`);
+  console.log(`app version: ${snapshot.app_version ?? "none"}`);
+  console.log(`release id: ${snapshot.release_id ?? "none"}`);
+  console.log(`upstream version: ${snapshot.upstream_version_id}`);
+  console.log(`corpus version: ${snapshot.corpus_version_id}`);
+  console.log(`new upstream version: ${snapshot.is_new_upstream_version === 1 ? "true" : "false"}`);
+  console.log(`new corpus version: ${snapshot.is_new_corpus_version === 1 ? "true" : "false"}`);
+  console.log(`artifact kinds: ${formatArtifactCountRows(counts)}`);
 }
 
 function collectDesktopSignals(
@@ -298,6 +344,16 @@ function parseLayer(value: string | undefined): CollectLayer | null {
   return null;
 }
 
+function parseLayerFromOption(args: string[]): CollectLayer | null {
+  const index = args.findIndex((value) => value === "--layer");
+
+  if (index === -1) {
+    return null;
+  }
+
+  return parseLayer(args[index + 1]);
+}
+
 function parseChannel(args: string[]): ReleaseChannel | null {
   const index = args.findIndex((value) => value === "--channel");
 
@@ -316,6 +372,13 @@ function parseChannel(args: string[]): ReleaseChannel | null {
 
 function printUsage(): void {
   console.error("usage: discorpus collect <desktop|web> --channel <stable|ptb|canary>");
+  console.error("usage: discorpus inspect latest --channel <stable|ptb|canary> --layer <desktop|web>");
+}
+
+function formatArtifactCountRows(rows: { count: number; kind: string }[]): string {
+  return rows
+    .map((row) => `${row.kind}=${row.count}`)
+    .join(", ");
 }
 
 void main().catch((error: unknown) => {
