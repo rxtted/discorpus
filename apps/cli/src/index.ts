@@ -1,5 +1,10 @@
 import { formatSnapshotKey, type CorpusLayer, type ReleaseChannel, type VersionSignal } from "@discorpus/core";
-import { discoverWindowsDesktopInstall, type WindowsDesktopInstall } from "@discorpus/platform-windows";
+import {
+  collectWindowsDesktopManifest,
+  discoverWindowsDesktopInstall,
+  type WindowsDesktopInstall,
+  type WindowsDesktopManifest,
+} from "@discorpus/platform-windows";
 import { InMemorySnapshotStore } from "@discorpus/storage";
 import { createDiscordSnapshotKey, discordPlatforms, isDiscordChannel } from "@discorpus/targets-discord";
 import { decideVersion } from "@discorpus/versioning";
@@ -33,10 +38,12 @@ async function runCollect(layer: CollectLayer, channel: ReleaseChannel): Promise
   const snapshotStore = new InMemorySnapshotStore();
   const snapshot = snapshotStore.createSnapshotRecord(snapshotKey, observedAt);
   let desktopInstall: WindowsDesktopInstall | null = null;
+  let desktopManifest: WindowsDesktopManifest | null = null;
   let signals: VersionSignal[];
 
   if (layer === "desktop") {
     desktopInstall = await requireDesktopInstall(channel);
+    desktopManifest = await collectWindowsDesktopManifest(desktopInstall);
     signals = collectDesktopSignals(desktopInstall);
   } else {
     signals = [
@@ -61,8 +68,9 @@ async function runCollect(layer: CollectLayer, channel: ReleaseChannel): Promise
   console.log(`snapshot id: ${snapshot.id}`);
   console.log(`upstream version: ${version.upstreamVersionId}`);
   console.log(`corpus version: ${version.corpusVersionId}`);
-  if (desktopInstall) {
+  if (desktopInstall && desktopManifest) {
     printDesktopDiscovery(desktopInstall);
+    printDesktopManifest(snapshot.id, snapshotStore, desktopManifest);
   }
   console.log(`status: ${layer} collection ${layer === "desktop" ? "discovery" : "stub"} ready`);
 }
@@ -127,6 +135,55 @@ function printDesktopDiscovery(install: WindowsDesktopInstall): void {
   console.log(`desktop update exe: ${install.updateExePath ?? "none"}`);
   console.log(`desktop resources dir: ${install.resourcesDir ?? "none"}`);
   console.log(`desktop app asar: ${install.appAsarPath ?? "none"}`);
+}
+
+function printDesktopManifest(
+  snapshotId: string,
+  snapshotStore: InMemorySnapshotStore,
+  manifest: WindowsDesktopManifest,
+): void {
+  const records = manifest.artifacts.map((artifact) =>
+    snapshotStore.createArtifactRecord({
+      snapshotId,
+      kind: artifact.kind,
+      path: artifact.relativePath,
+      sha256: artifact.sha256,
+      size: artifact.size,
+      source: artifact.path,
+    }),
+  );
+  const counts = countArtifactKinds(records);
+  const importantArtifacts = records.filter((record) =>
+    record.kind === "updater" ||
+    record.kind === "desktop_executable" ||
+    record.kind === "app_asar" ||
+    record.kind === "dll" ||
+    record.kind === "runtime_blob",
+  );
+
+  console.log(`desktop artifact count: ${records.length}`);
+  console.log(`desktop artifact kinds: ${formatArtifactCounts(counts)}`);
+
+  for (const artifact of importantArtifacts.slice(0, 12)) {
+    console.log(`artifact ${artifact.kind}: ${artifact.path} ${artifact.sha256}`);
+  }
+}
+
+function countArtifactKinds(records: ReturnType<InMemorySnapshotStore["createArtifactRecord"]>[]): Map<string, number> {
+  const counts = new Map<string, number>();
+
+  for (const record of records) {
+    counts.set(record.kind, (counts.get(record.kind) ?? 0) + 1);
+  }
+
+  return counts;
+}
+
+function formatArtifactCounts(counts: Map<string, number>): string {
+  return [...counts.entries()]
+    .sort((left, right) => left[0].localeCompare(right[0]))
+    .map(([kind, count]) => `${kind}=${count}`)
+    .join(", ");
 }
 
 function parseLayer(value: string | undefined): CollectLayer | null {

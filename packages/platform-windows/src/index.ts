@@ -1,4 +1,5 @@
-import { access, readdir } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { access, readdir, readFile, stat } from "node:fs/promises";
 import path from "node:path";
 
 import type { ReleaseChannel } from "@discorpus/core";
@@ -12,6 +13,19 @@ export interface WindowsDesktopInstall {
   resourcesDir: string | null;
   appAsarPath: string | null;
   installedVersions: string[];
+}
+
+export interface WindowsDesktopArtifact {
+  kind: string;
+  path: string;
+  relativePath: string;
+  sha256: string;
+  size: number;
+}
+
+export interface WindowsDesktopManifest {
+  install: WindowsDesktopInstall;
+  artifacts: WindowsDesktopArtifact[];
 }
 
 const channelDirs: Record<ReleaseChannel, string> = {
@@ -67,6 +81,44 @@ export async function discoverWindowsDesktopInstall(
   };
 }
 
+export async function collectWindowsDesktopManifest(
+  install: WindowsDesktopInstall,
+): Promise<WindowsDesktopManifest> {
+  const paths = new Set<string>();
+
+  if (install.updateExePath) {
+    paths.add(install.updateExePath);
+  }
+
+  if (install.currentAppDir) {
+    const appPaths = await walkFiles(install.currentAppDir);
+
+    for (const value of appPaths) {
+      paths.add(value);
+    }
+  }
+
+  const artifacts = await Promise.all(
+    [...paths].sort().map(async (filePath) => {
+      const fileStat = await stat(filePath);
+      const sha256 = await hashFile(filePath);
+
+      return {
+        kind: classifyArtifact(filePath, install),
+        path: filePath,
+        relativePath: toRelativeArtifactPath(filePath, install),
+        sha256,
+        size: fileStat.size,
+      };
+    }),
+  );
+
+  return {
+    install,
+    artifacts,
+  };
+}
+
 async function findAppDirs(rootDir: string): Promise<string[]> {
   const entries = await readdir(rootDir, { withFileTypes: true });
 
@@ -74,6 +126,27 @@ async function findAppDirs(rootDir: string): Promise<string[]> {
     .filter((entry) => entry.isDirectory() && entry.name.startsWith("app-"))
     .map((entry) => path.join(rootDir, entry.name))
     .sort(compareAppDirs);
+}
+
+async function walkFiles(rootDir: string): Promise<string[]> {
+  const entries = await readdir(rootDir, { withFileTypes: true });
+  const files: string[] = [];
+
+  for (const entry of entries) {
+    const fullPath = path.join(rootDir, entry.name);
+
+    if (entry.isDirectory()) {
+      const nestedFiles = await walkFiles(fullPath);
+      files.push(...nestedFiles);
+      continue;
+    }
+
+    if (entry.isFile()) {
+      files.push(fullPath);
+    }
+  }
+
+  return files;
 }
 
 function compareAppDirs(left: string, right: string): number {
@@ -108,6 +181,55 @@ function toVersionNumber(value: string): number {
 
 async function pickExistingPath(value: string): Promise<string | null> {
   return (await pathExists(value)) ? value : null;
+}
+
+async function hashFile(filePath: string): Promise<string> {
+  const buffer = await readFile(filePath);
+  return createHash("sha256").update(buffer).digest("hex");
+}
+
+function classifyArtifact(filePath: string, install: WindowsDesktopInstall): string {
+  if (install.updateExePath && filePath === install.updateExePath) {
+    return "updater";
+  }
+
+  if (install.executablePath && filePath === install.executablePath) {
+    return "desktop_executable";
+  }
+
+  if (install.appAsarPath && filePath === install.appAsarPath) {
+    return "app_asar";
+  }
+
+  if (filePath.endsWith(".dll")) {
+    return "dll";
+  }
+
+  if (filePath.includes(`${path.sep}locales${path.sep}`)) {
+    return "locale";
+  }
+
+  if (filePath.endsWith(".pak")) {
+    return "pak";
+  }
+
+  if (filePath.endsWith(".bin") || filePath.endsWith(".dat")) {
+    return "runtime_blob";
+  }
+
+  return "file";
+}
+
+function toRelativeArtifactPath(filePath: string, install: WindowsDesktopInstall): string {
+  if (install.updateExePath && filePath === install.updateExePath) {
+    return path.basename(filePath);
+  }
+
+  if (install.currentAppDir) {
+    return path.relative(install.currentAppDir, filePath);
+  }
+
+  return path.basename(filePath);
 }
 
 async function pathExists(value: string): Promise<boolean> {
