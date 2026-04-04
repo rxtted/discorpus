@@ -1,0 +1,14 @@
+node_modules
+.nx
+dist
+coverage
+tmp
+.DS_Store
+
+# local corpus data
+data
+artifacts
+snapshots
+*.db
+*.sqlite
+*.sqlite3

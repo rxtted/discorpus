@@ -1,0 +1,21 @@
+{
+  "name": "discorpus",
+  "version": "0.1.0",
+  "private": true,
+  "description": "versioned discord desktop and web artifact corpus for research",
+  "packageManager": "pnpm@10.8.1",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "check": "tsc -b --pretty false",
+    "clean": "git clean -fdX -e .env",
+    "dev": "pnpm build && pnpm start",
+    "start": "pnpm --filter @discorpus/cli start"
+  },
+  "devDependencies": {
+    "@types/node": "^24.5.2",
+    "typescript": "^5.9.2"
+  }
+}

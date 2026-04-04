@@ -1,0 +1,19 @@
+{
+  "name": "@discorpus/cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "discorpus": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "check": "tsc -b --pretty false",
+    "dev": "node ./dist/index.js",
+    "start": "node ./dist/index.js"
+  },
+  "dependencies": {
+    "@discorpus/core": "workspace:*",
+    "@discorpus/targets-discord": "workspace:*"
+  }
+}
