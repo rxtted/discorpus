@@ -57,3 +57,23 @@ export function decideVersion(input: VersionInput): VersionDecision {
     isNewCorpusVersion: true,
   };
 }
+
+export function createVersionSet(input: VersionInput): {
+  corpusVersion: CorpusVersionRecord;
+  decision: VersionDecision;
+  upstreamVersion: UpstreamVersionRecord;
+} {
+  const upstreamVersion = createUpstreamVersionRecord(input);
+  const corpusVersion = createCorpusVersionRecord(upstreamVersion, input.normalizedFingerprint, input.observedAt);
+
+  return {
+    upstreamVersion,
+    corpusVersion,
+    decision: {
+      upstreamVersionId: upstreamVersion.id,
+      corpusVersionId: corpusVersion.id,
+      isNewUpstreamVersion: true,
+      isNewCorpusVersion: true,
+    },
+  };
+}

@@ -19,6 +19,7 @@
     "forceConsistentCasingInFileNames": true,
     "paths": {
       "@discorpus/core": ["./packages/core/src/index.ts"],
+      "@discorpus/db": ["./packages/db/src/index.ts"],
       "@discorpus/platform-windows": ["./packages/platform-windows/src/index.ts"],
       "@discorpus/storage": ["./packages/storage/src/index.ts"],
       "@discorpus/targets-discord": ["./packages/targets-discord/src/index.ts"],

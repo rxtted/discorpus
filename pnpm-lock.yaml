@@ -20,6 +20,9 @@ importers:
       '@discorpus/core':
         specifier: workspace:*
         version: link:../../packages/core
+      '@discorpus/db':
+        specifier: workspace:*
+        version: link:../../packages/db
       '@discorpus/platform-windows':
         specifier: workspace:*
         version: link:../../packages/platform-windows
@@ -34,6 +37,12 @@ importers:
         version: link:../../packages/versioning
 
   packages/core: {}
+
+  packages/db:
+    dependencies:
+      '@discorpus/core':
+        specifier: workspace:*
+        version: link:../core
 
   packages/platform-windows:
     dependencies:

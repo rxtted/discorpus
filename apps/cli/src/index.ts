@@ -1,6 +1,7 @@
 import path from "node:path";
 
 import { formatSnapshotKey, type CorpusLayer, type ReleaseChannel, type VersionSignal } from "@discorpus/core";
+import { ensureCorpusDatabase, indexSnapshot } from "@discorpus/db";
 import {
   collectWindowsDesktopManifest,
   discoverWindowsDesktopInstall,
@@ -9,7 +10,7 @@ import {
 } from "@discorpus/platform-windows";
 import { createSnapshotPaths, DiskBlobStore, InMemorySnapshotStore, writeJsonFile } from "@discorpus/storage";
 import { createDiscordSnapshotKey, discordPlatforms, isDiscordChannel } from "@discorpus/targets-discord";
-import { decideVersion } from "@discorpus/versioning";
+import { createVersionSet } from "@discorpus/versioning";
 
 type CollectLayer = Extract<CorpusLayer, "desktop" | "web">;
 
@@ -63,7 +64,7 @@ async function runCollect(layer: CollectLayer, channel: ReleaseChannel): Promise
       },
     ];
   }
-  const version = decideVersion({
+  const versionSet = createVersionSet({
     key: snapshotKey,
     observedAt,
     normalizedFingerprint: "pending",
@@ -74,13 +75,15 @@ async function runCollect(layer: CollectLayer, channel: ReleaseChannel): Promise
   console.log(`command: collect ${layer} --channel ${channel}`);
   console.log(`snapshot key: ${formatSnapshotKey(snapshotKey)}`);
   console.log(`snapshot id: ${snapshot.id}`);
-  console.log(`upstream version: ${version.upstreamVersionId}`);
-  console.log(`corpus version: ${version.corpusVersionId}`);
+  console.log(`upstream version: ${versionSet.decision.upstreamVersionId}`);
+  console.log(`corpus version: ${versionSet.decision.corpusVersionId}`);
   if (desktopInstall && desktopManifest) {
     printDesktopDiscovery(desktopInstall);
     printDesktopManifest(desktopArtifactRecords, desktopManifest);
-    const snapshotDir = await persistDesktopSnapshot(snapshot, desktopManifest, desktopArtifactRecords, version);
+    const snapshotDir = await persistDesktopSnapshot(snapshot, desktopManifest, desktopArtifactRecords, versionSet);
+    const dbPath = await persistSnapshotIndex(snapshot, desktopArtifactRecords, versionSet);
     console.log(`snapshot dir: ${snapshotDir}`);
+    console.log(`sqlite db: ${dbPath}`);
   }
   console.log(`status: ${layer} collection ${layer === "desktop" ? "discovery" : "stub"} ready`);
 }
@@ -232,7 +235,7 @@ async function persistDesktopSnapshot(
   snapshot: ReturnType<InMemorySnapshotStore["createSnapshotRecord"]>,
   manifest: WindowsDesktopManifest,
   records: ReturnType<InMemorySnapshotStore["createArtifactRecord"]>[],
-  version: ReturnType<typeof decideVersion>,
+  versionSet: ReturnType<typeof createVersionSet>,
 ): Promise<string> {
   const baseDir = path.join(process.cwd(), "data", "snapshots");
   const paths = await createSnapshotPaths(baseDir, snapshot.id);
@@ -252,9 +255,22 @@ async function persistDesktopSnapshot(
   await writeJsonFile(path.join(paths.desktopDir, "bootstrap-manifest.json"), manifest.bootstrapManifest);
   await writeJsonFile(path.join(paths.desktopDir, "module-manifests.json"), manifest.moduleManifests);
   await writeJsonFile(path.join(paths.desktopDir, "install.json"), manifest.install);
-  await writeJsonFile(path.join(paths.desktopDir, "version.json"), version);
+  await writeJsonFile(path.join(paths.desktopDir, "version.json"), versionSet.decision);
 
   return paths.rootDir;
+}
+
+async function persistSnapshotIndex(
+  snapshot: ReturnType<InMemorySnapshotStore["createSnapshotRecord"]>,
+  records: ReturnType<InMemorySnapshotStore["createArtifactRecord"]>[],
+  versionSet: ReturnType<typeof createVersionSet>,
+): Promise<string> {
+  const dataDir = path.join(process.cwd(), "data");
+  const db = await ensureCorpusDatabase(dataDir);
+
+  indexSnapshot(db.databasePath, snapshot, versionSet, records);
+
+  return db.databasePath;
 }
 
 function countArtifactKinds(records: ReturnType<InMemorySnapshotStore["createArtifactRecord"]>[]): Map<string, number> {
