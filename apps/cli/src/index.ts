@@ -7,7 +7,7 @@ import {
   type WindowsDesktopInstall,
   type WindowsDesktopManifest,
 } from "@discorpus/platform-windows";
-import { createSnapshotPaths, InMemorySnapshotStore, writeJsonFile } from "@discorpus/storage";
+import { createSnapshotPaths, DiskBlobStore, InMemorySnapshotStore, writeJsonFile } from "@discorpus/storage";
 import { createDiscordSnapshotKey, discordPlatforms, isDiscordChannel } from "@discorpus/targets-discord";
 import { decideVersion } from "@discorpus/versioning";
 
@@ -47,7 +47,7 @@ async function runCollect(layer: CollectLayer, channel: ReleaseChannel): Promise
   if (layer === "desktop") {
     desktopInstall = await requireDesktopInstall(channel);
     desktopManifest = await collectWindowsDesktopManifest(desktopInstall);
-    desktopArtifactRecords = createDesktopArtifactRecords(snapshot.id, snapshotStore, desktopManifest);
+    desktopArtifactRecords = await createDesktopArtifactRecords(snapshot.id, snapshotStore, desktopManifest);
     snapshot.release = {
       appVersion: desktopManifest.buildInfo?.version,
       releaseId: desktopManifest.buildInfo?.releaseChannel,
@@ -206,21 +206,26 @@ function printDesktopManifest(
   }
 }
 
-function createDesktopArtifactRecords(
+async function createDesktopArtifactRecords(
   snapshotId: string,
   snapshotStore: InMemorySnapshotStore,
   manifest: WindowsDesktopManifest,
-): ReturnType<InMemorySnapshotStore["createArtifactRecord"]>[] {
-  return manifest.artifacts.map((artifact) =>
-    snapshotStore.createArtifactRecord({
+): Promise<ReturnType<InMemorySnapshotStore["createArtifactRecord"]>[]> {
+  const blobStore = new DiskBlobStore(path.join(process.cwd(), "data", "blobs"));
+
+  return Promise.all(manifest.artifacts.map(async (artifact) => {
+    const blob = await blobStore.persistFile(artifact.path, artifact.sha256, "raw");
+
+    return snapshotStore.createArtifactRecord({
       snapshotId,
       kind: artifact.kind,
       path: artifact.relativePath,
       sha256: artifact.sha256,
       size: artifact.size,
       source: artifact.path,
-    }),
-  );
+      blob,
+    });
+  }));
 }
 
 async function persistDesktopSnapshot(
@@ -234,6 +239,15 @@ async function persistDesktopSnapshot(
 
   await writeJsonFile(path.join(paths.rootDir, "snapshot.json"), snapshot);
   await writeJsonFile(path.join(paths.rootDir, "artifacts.json"), records);
+  await writeJsonFile(
+    path.join(paths.rootDir, "blob-index.json"),
+    records.map((record) => ({
+      id: record.id,
+      path: record.path,
+      sha256: record.sha256,
+      blob: record.blob ?? null,
+    })),
+  );
   await writeJsonFile(path.join(paths.desktopDir, "build-info.json"), manifest.buildInfo);
   await writeJsonFile(path.join(paths.desktopDir, "bootstrap-manifest.json"), manifest.bootstrapManifest);
   await writeJsonFile(path.join(paths.desktopDir, "module-manifests.json"), manifest.moduleManifests);

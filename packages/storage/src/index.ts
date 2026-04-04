@@ -1,15 +1,12 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { access, copyFile, mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-import { createArtifactId, createSnapshotId, type ArtifactRecord, type SnapshotKey, type SnapshotRecord } from "@discorpus/core";
-
-export interface BlobLocation {
-  kind: "raw" | "derived" | "normalized";
-  relativePath: string;
-}
+import { createArtifactId, createSnapshotId, type ArtifactRecord, type BlobLocation, type SnapshotKey, type SnapshotRecord } from "@discorpus/core";
 
 export interface BlobStore {
   createBlobPath(sha256: string): string;
+  createBlobLocation(sha256: string, kind?: BlobLocation["kind"]): BlobLocation;
+  persistFile(filePath: string, sha256: string, kind?: BlobLocation["kind"]): Promise<BlobLocation>;
 }
 
 export interface SnapshotStore {
@@ -27,7 +24,29 @@ export class DiskBlobStore implements BlobStore {
 
   createBlobPath(sha256: string): string {
     const prefix = sha256.slice(0, 2);
-    return `${this.rootDir}/${prefix}/${sha256}`;
+    return path.join(this.rootDir, prefix, sha256);
+  }
+
+  createBlobLocation(sha256: string, kind: BlobLocation["kind"] = "raw"): BlobLocation {
+    const prefix = sha256.slice(0, 2);
+
+    return {
+      kind,
+      relativePath: path.join(prefix, sha256),
+    };
+  }
+
+  async persistFile(filePath: string, sha256: string, kind: BlobLocation["kind"] = "raw"): Promise<BlobLocation> {
+    const blobPath = this.createBlobPath(sha256);
+    const blobLocation = this.createBlobLocation(sha256, kind);
+
+    await mkdir(path.dirname(blobPath), { recursive: true });
+
+    if (!(await pathExists(blobPath))) {
+      await copyFile(filePath, blobPath);
+    }
+
+    return blobLocation;
   }
 }
 
@@ -64,4 +83,13 @@ export async function createSnapshotPaths(baseDir: string, snapshotId: string): 
 export async function writeJsonFile(filePath: string, value: unknown): Promise<void> {
   await mkdir(path.dirname(filePath), { recursive: true });
   await writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+}
+
+async function pathExists(filePath: string): Promise<boolean> {
+  try {
+    await access(filePath);
+    return true;
+  } catch {
+    return false;
+  }
 }

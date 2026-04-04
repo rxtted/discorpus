@@ -31,6 +31,12 @@ export interface ArtifactRecord {
   sha256: string;
   size: number;
   source: string;
+  blob?: BlobLocation;
+}
+
+export interface BlobLocation {
+  kind: "raw" | "derived" | "normalized";
+  relativePath: string;
 }
 
 export interface VersionSignal {
