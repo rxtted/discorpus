@@ -1,3 +1,6 @@
+import { mkdir, writeFile } from "node:fs/promises";
+import path from "node:path";
+
 import { createArtifactId, createSnapshotId, type ArtifactRecord, type SnapshotKey, type SnapshotRecord } from "@discorpus/core";
 
 export interface BlobLocation {
@@ -12,6 +15,11 @@ export interface BlobStore {
 export interface SnapshotStore {
   createSnapshotRecord(key: SnapshotKey, observedAt: string): SnapshotRecord;
   createArtifactRecord(input: Omit<ArtifactRecord, "id">): ArtifactRecord;
+}
+
+export interface SnapshotPaths {
+  rootDir: string;
+  desktopDir: string;
 }
 
 export class DiskBlobStore implements BlobStore {
@@ -39,4 +47,21 @@ export class InMemorySnapshotStore implements SnapshotStore {
       id: createArtifactId(input.snapshotId, input.path, input.sha256),
     };
   }
+}
+
+export async function createSnapshotPaths(baseDir: string, snapshotId: string): Promise<SnapshotPaths> {
+  const rootDir = path.join(baseDir, snapshotId);
+  const desktopDir = path.join(rootDir, "desktop");
+
+  await mkdir(desktopDir, { recursive: true });
+
+  return {
+    rootDir,
+    desktopDir,
+  };
+}
+
+export async function writeJsonFile(filePath: string, value: unknown): Promise<void> {
+  await mkdir(path.dirname(filePath), { recursive: true });
+  await writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
 }

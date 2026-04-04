@@ -1,3 +1,5 @@
+import path from "node:path";
+
 import { formatSnapshotKey, type CorpusLayer, type ReleaseChannel, type VersionSignal } from "@discorpus/core";
 import {
   collectWindowsDesktopManifest,
@@ -5,7 +7,7 @@ import {
   type WindowsDesktopInstall,
   type WindowsDesktopManifest,
 } from "@discorpus/platform-windows";
-import { InMemorySnapshotStore } from "@discorpus/storage";
+import { createSnapshotPaths, InMemorySnapshotStore, writeJsonFile } from "@discorpus/storage";
 import { createDiscordSnapshotKey, discordPlatforms, isDiscordChannel } from "@discorpus/targets-discord";
 import { decideVersion } from "@discorpus/versioning";
 
@@ -39,11 +41,17 @@ async function runCollect(layer: CollectLayer, channel: ReleaseChannel): Promise
   const snapshot = snapshotStore.createSnapshotRecord(snapshotKey, observedAt);
   let desktopInstall: WindowsDesktopInstall | null = null;
   let desktopManifest: WindowsDesktopManifest | null = null;
+  let desktopArtifactRecords: ReturnType<InMemorySnapshotStore["createArtifactRecord"]>[] = [];
   let signals: VersionSignal[];
 
   if (layer === "desktop") {
     desktopInstall = await requireDesktopInstall(channel);
     desktopManifest = await collectWindowsDesktopManifest(desktopInstall);
+    desktopArtifactRecords = createDesktopArtifactRecords(snapshot.id, snapshotStore, desktopManifest);
+    snapshot.release = {
+      appVersion: desktopManifest.buildInfo?.version,
+      releaseId: desktopManifest.buildInfo?.releaseChannel,
+    };
     signals = collectDesktopSignals(desktopInstall, desktopManifest);
   } else {
     signals = [
@@ -70,7 +78,9 @@ async function runCollect(layer: CollectLayer, channel: ReleaseChannel): Promise
   console.log(`corpus version: ${version.corpusVersionId}`);
   if (desktopInstall && desktopManifest) {
     printDesktopDiscovery(desktopInstall);
-    printDesktopManifest(snapshot.id, snapshotStore, desktopManifest);
+    printDesktopManifest(desktopArtifactRecords, desktopManifest);
+    const snapshotDir = await persistDesktopSnapshot(snapshot, desktopManifest, desktopArtifactRecords, version);
+    console.log(`snapshot dir: ${snapshotDir}`);
   }
   console.log(`status: ${layer} collection ${layer === "desktop" ? "discovery" : "stub"} ready`);
 }
@@ -136,7 +146,7 @@ function collectDesktopSignals(
   for (const moduleName of Object.keys(manifest.moduleManifests).sort()) {
     signals.push({
       scope: "desktop",
-      name: "bootstrap_module",
+      name: "module_manifest",
       value: moduleName,
       confidence: "medium",
     });
@@ -168,20 +178,9 @@ function printDesktopDiscovery(install: WindowsDesktopInstall): void {
 }
 
 function printDesktopManifest(
-  snapshotId: string,
-  snapshotStore: InMemorySnapshotStore,
+  records: ReturnType<InMemorySnapshotStore["createArtifactRecord"]>[],
   manifest: WindowsDesktopManifest,
 ): void {
-  const records = manifest.artifacts.map((artifact) =>
-    snapshotStore.createArtifactRecord({
-      snapshotId,
-      kind: artifact.kind,
-      path: artifact.relativePath,
-      sha256: artifact.sha256,
-      size: artifact.size,
-      source: artifact.path,
-    }),
-  );
   const counts = countArtifactKinds(records);
   const importantArtifacts = records.filter((record) =>
     record.kind === "updater" ||
@@ -205,6 +204,43 @@ function printDesktopManifest(
   for (const artifact of importantArtifacts.slice(0, 12)) {
     console.log(`artifact ${artifact.kind}: ${artifact.path} ${artifact.sha256}`);
   }
+}
+
+function createDesktopArtifactRecords(
+  snapshotId: string,
+  snapshotStore: InMemorySnapshotStore,
+  manifest: WindowsDesktopManifest,
+): ReturnType<InMemorySnapshotStore["createArtifactRecord"]>[] {
+  return manifest.artifacts.map((artifact) =>
+    snapshotStore.createArtifactRecord({
+      snapshotId,
+      kind: artifact.kind,
+      path: artifact.relativePath,
+      sha256: artifact.sha256,
+      size: artifact.size,
+      source: artifact.path,
+    }),
+  );
+}
+
+async function persistDesktopSnapshot(
+  snapshot: ReturnType<InMemorySnapshotStore["createSnapshotRecord"]>,
+  manifest: WindowsDesktopManifest,
+  records: ReturnType<InMemorySnapshotStore["createArtifactRecord"]>[],
+  version: ReturnType<typeof decideVersion>,
+): Promise<string> {
+  const baseDir = path.join(process.cwd(), "data", "snapshots");
+  const paths = await createSnapshotPaths(baseDir, snapshot.id);
+
+  await writeJsonFile(path.join(paths.rootDir, "snapshot.json"), snapshot);
+  await writeJsonFile(path.join(paths.rootDir, "artifacts.json"), records);
+  await writeJsonFile(path.join(paths.desktopDir, "build-info.json"), manifest.buildInfo);
+  await writeJsonFile(path.join(paths.desktopDir, "bootstrap-manifest.json"), manifest.bootstrapManifest);
+  await writeJsonFile(path.join(paths.desktopDir, "module-manifests.json"), manifest.moduleManifests);
+  await writeJsonFile(path.join(paths.desktopDir, "install.json"), manifest.install);
+  await writeJsonFile(path.join(paths.desktopDir, "version.json"), version);
+
+  return paths.rootDir;
 }
 
 function countArtifactKinds(records: ReturnType<InMemorySnapshotStore["createArtifactRecord"]>[]): Map<string, number> {
