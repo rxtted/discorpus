@@ -20,3 +20,7 @@ export function createDiscordSnapshotKey(
     layer,
   };
 }
+
+export function isDiscordChannel(value: string): value is ReleaseChannel {
+  return discordChannels.includes(value as ReleaseChannel);
+}

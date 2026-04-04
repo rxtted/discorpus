@@ -2,7 +2,9 @@
   "files": [],
   "references": [
     { "path": "./packages/core" },
+    { "path": "./packages/storage" },
     { "path": "./packages/targets-discord" },
+    { "path": "./packages/versioning" },
     { "path": "./apps/cli" }
   ]
 }

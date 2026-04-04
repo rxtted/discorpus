@@ -33,10 +33,42 @@ export interface ArtifactRecord {
   source: string;
 }
 
+export interface VersionSignal {
+  scope: "desktop" | "web";
+  name: string;
+  value: string;
+  confidence: "low" | "medium" | "high";
+}
+
+export interface UpstreamVersionRecord extends SnapshotKey {
+  id: string;
+  fingerprint: string;
+  signals: VersionSignal[];
+  createdAt: string;
+}
+
+export interface CorpusVersionRecord extends SnapshotKey {
+  id: string;
+  upstreamVersionId: string;
+  normalizedFingerprint: string;
+  createdAt: string;
+}
+
+export interface VersionDecision {
+  upstreamVersionId: string;
+  corpusVersionId: string;
+  isNewUpstreamVersion: boolean;
+  isNewCorpusVersion: boolean;
+}
+
 export function formatSnapshotKey(key: SnapshotKey): string {
   return [key.target, key.channel, key.platform, key.layer].join(":");
 }
 
 export function createSnapshotId(key: SnapshotKey, observedAt: string): string {
   return `${formatSnapshotKey(key)}:${observedAt}`;
+}
+
+export function createArtifactId(snapshotId: string, path: string, sha256: string): string {
+  return `${snapshotId}:${path}:${sha256}`;
 }
