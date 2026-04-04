@@ -1,11 +1,12 @@
-import { formatSnapshotKey, type CorpusLayer, type ReleaseChannel } from "@discorpus/core";
+import { formatSnapshotKey, type CorpusLayer, type ReleaseChannel, type VersionSignal } from "@discorpus/core";
+import { discoverWindowsDesktopInstall, type WindowsDesktopInstall } from "@discorpus/platform-windows";
 import { InMemorySnapshotStore } from "@discorpus/storage";
 import { createDiscordSnapshotKey, discordPlatforms, isDiscordChannel } from "@discorpus/targets-discord";
 import { decideVersion } from "@discorpus/versioning";
 
 type CollectLayer = Extract<CorpusLayer, "desktop" | "web">;
 
-function main(): void {
+async function main(): Promise<void> {
   const args = process.argv.slice(2);
 
   if (args[0] !== "collect") {
@@ -23,26 +24,35 @@ function main(): void {
     return;
   }
 
-  runCollect(layer, channel);
+  await runCollect(layer, channel);
 }
 
-function runCollect(layer: CollectLayer, channel: ReleaseChannel): void {
+async function runCollect(layer: CollectLayer, channel: ReleaseChannel): Promise<void> {
   const observedAt = new Date().toISOString();
   const snapshotKey = createDiscordSnapshotKey(channel, discordPlatforms[0], layer);
   const snapshotStore = new InMemorySnapshotStore();
   const snapshot = snapshotStore.createSnapshotRecord(snapshotKey, observedAt);
-  const version = decideVersion({
-    key: snapshotKey,
-    observedAt,
-    normalizedFingerprint: "pending",
-    signals: [
+  let desktopInstall: WindowsDesktopInstall | null = null;
+  let signals: VersionSignal[];
+
+  if (layer === "desktop") {
+    desktopInstall = await requireDesktopInstall(channel);
+    signals = collectDesktopSignals(desktopInstall);
+  } else {
+    signals = [
       {
-        scope: layer,
+        scope: "web",
         name: "collection_stub",
         value: channel,
         confidence: "medium",
       },
-    ],
+    ];
+  }
+  const version = decideVersion({
+    key: snapshotKey,
+    observedAt,
+    normalizedFingerprint: "pending",
+    signals,
   });
 
   console.log("discorpus");
@@ -51,7 +61,72 @@ function runCollect(layer: CollectLayer, channel: ReleaseChannel): void {
   console.log(`snapshot id: ${snapshot.id}`);
   console.log(`upstream version: ${version.upstreamVersionId}`);
   console.log(`corpus version: ${version.corpusVersionId}`);
-  console.log(`status: ${layer} collection stub ready`);
+  if (desktopInstall) {
+    printDesktopDiscovery(desktopInstall);
+  }
+  console.log(`status: ${layer} collection ${layer === "desktop" ? "discovery" : "stub"} ready`);
+}
+
+function collectDesktopSignals(install: WindowsDesktopInstall): VersionSignal[] {
+  const signals: VersionSignal[] = [
+    {
+      scope: "desktop",
+      name: "root_dir",
+      value: install.rootDir,
+      confidence: "high",
+    },
+  ];
+
+  for (const version of install.installedVersions) {
+    signals.push({
+      scope: "desktop",
+      name: "installed_version",
+      value: version,
+      confidence: "medium",
+    });
+  }
+
+  if (install.currentAppDir) {
+    signals.push({
+      scope: "desktop",
+      name: "current_app_dir",
+      value: install.currentAppDir,
+      confidence: "high",
+    });
+  }
+
+  if (install.appAsarPath) {
+    signals.push({
+      scope: "desktop",
+      name: "app_asar_path",
+      value: install.appAsarPath,
+      confidence: "high",
+    });
+  }
+
+  return signals;
+}
+
+async function requireDesktopInstall(channel: ReleaseChannel): Promise<WindowsDesktopInstall> {
+  const install = await discoverWindowsDesktopInstall(channel);
+
+  if (!install) {
+    console.error(`desktop install not found for channel: ${channel}`);
+    process.exitCode = 1;
+    throw new Error("desktop install not found");
+  }
+
+  return install;
+}
+
+function printDesktopDiscovery(install: WindowsDesktopInstall): void {
+  console.log(`desktop install root: ${install.rootDir}`);
+  console.log(`desktop installed versions: ${install.installedVersions.join(", ") || "none"}`);
+  console.log(`desktop current app dir: ${install.currentAppDir ?? "none"}`);
+  console.log(`desktop executable: ${install.executablePath ?? "none"}`);
+  console.log(`desktop update exe: ${install.updateExePath ?? "none"}`);
+  console.log(`desktop resources dir: ${install.resourcesDir ?? "none"}`);
+  console.log(`desktop app asar: ${install.appAsarPath ?? "none"}`);
 }
 
 function parseLayer(value: string | undefined): CollectLayer | null {
@@ -82,4 +157,11 @@ function printUsage(): void {
   console.error("usage: discorpus collect <desktop|web> --channel <stable|ptb|canary>");
 }
 
-main();
+void main().catch((error: unknown) => {
+  if (error instanceof Error && error.message === "desktop install not found") {
+    return;
+  }
+
+  console.error(error);
+  process.exitCode = 1;
+});

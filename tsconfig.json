@@ -2,6 +2,7 @@
   "files": [],
   "references": [
     { "path": "./packages/core" },
+    { "path": "./packages/platform-windows" },
     { "path": "./packages/storage" },
     { "path": "./packages/targets-discord" },
     { "path": "./packages/versioning" },
