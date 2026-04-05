@@ -1,26 +1,14 @@
 import { createSnapshotDirName } from "@discorpus/storage";
 
-import type { ArtifactSearchRow } from "@discorpus/db";
+import type { ArtifactKindCountRow, ArtifactSearchRow, LatestSnapshotRow, SnapshotListRow } from "@discorpus/db";
 
 import type { ArchiveEntry, ArtifactDiff, InspectableEntry, SnapshotArtifact } from "../types/inspect.js";
 import { countKinds, formatArtifactCountRows, formatArtifactCounts, formatCorpusSummary, formatCount, formatUpstreamSummary } from "../shared.js";
 
 export function printSnapshotSummary(
-  snapshot: {
-    app_version: string | null;
-    channel: string;
-    corpus_version_id: string;
-    id: string;
-    is_new_corpus_version: number;
-    is_new_upstream_version: number;
-    layer: string;
-    observed_at: string;
-    platform: string;
-    release_id: string | null;
-    target: string;
-  },
+  snapshot: LatestSnapshotRow,
   dbPath: string,
-  counts: Array<{ count: number; kind: string }>,
+  counts: ArtifactKindCountRow[],
 ): void {
   console.log(`snapshot id: ${snapshot.id}`);
   console.log(`target: ${snapshot.target}`);
@@ -40,20 +28,13 @@ export function printSnapshotSummary(
 
 export function printSnapshotTree(
   dbPath: string,
-  snapshots: Array<{
-    app_version: string | null;
-    channel: string;
-    id: string;
-    layer: string;
-    observed_at: string;
-    release_id: string | null;
-  }>,
+  snapshots: SnapshotListRow[],
 ): void {
   console.log(`sqlite db: ${dbPath}`);
   console.log(`snapshots: ${snapshots.length}`);
 
   if (snapshots.length === 0) {
-    console.log("status: no snapshots indexed");
+    console.log("no snapshots indexed");
     return;
   }
 
@@ -90,6 +71,11 @@ export function printSnapshotTree(
 export function printArtifactSearchResults(results: ArtifactSearchRow[], dbPath: string): void {
   console.log(`results: ${results.length}`);
   console.log(`sqlite db: ${dbPath}`);
+
+  if (results.length === 0) {
+    console.log("no artifacts found");
+    return;
+  }
 
   for (const result of results.slice(0, 20)) {
     console.log(`${result.kind} ${result.path}`);
@@ -169,7 +155,7 @@ export function printDiffSummary(currentSnapshotId: string, previousSnapshotId: 
   console.log(`changed: ${diff.changed.length}`);
 
   if (diff.added.length === 0 && diff.removed.length === 0 && diff.changed.length === 0) {
-    console.log("status: no artifact changes detected");
+    console.log("no artifact changes detected");
     return;
   }
 
@@ -191,5 +177,5 @@ export function printDiffSummary(currentSnapshotId: string, previousSnapshotId: 
 export function printNoPreviousDiff(currentSnapshotId: string): void {
   console.log(`current snapshot: ${currentSnapshotId}`);
   console.log("previous snapshot: none");
-  console.log("status: no previous snapshot in lineage");
+  console.log("no previous snapshot in lineage");
 }
