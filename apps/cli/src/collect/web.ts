@@ -824,6 +824,7 @@ function isExcludedContentResource(resource: DevtoolsCapturedResource): boolean 
 
   return pathname.startsWith("/app-assets/") ||
     pathname.startsWith("/app-icons/") ||
+    pathname.startsWith("/api/") ||
     pathname.startsWith("/avatar-decoration-presets/") ||
     pathname.startsWith("/avatars/") ||
     pathname.startsWith("/guild-icons/") ||
