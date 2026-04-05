@@ -1,5 +1,5 @@
 import type { AsarArchiveSummary } from "@discorpus/asar";
-import type { DevtoolsTargetInfo, DevtoolsVersionInfo } from "@discorpus/runtime-cdp";
+import type { DevtoolsNetworkCapture, DevtoolsTargetInfo, DevtoolsVersionInfo } from "@discorpus/runtime-cdp";
 import type { WindowsDesktopLaunchPlan } from "@discorpus/platform-windows";
 import { InMemorySnapshotStore } from "@discorpus/storage";
 import type { ReleaseChannel } from "@discorpus/core";
@@ -27,8 +27,11 @@ export interface DesktopAsarExtractionResult extends DesktopAsarExtraction {
 }
 
 export interface WebCapturedDocument {
+  body?: Uint8Array;
   contentType: string | null;
   finalUrl: string;
+  headers?: Record<string, unknown>;
+  resourceType?: string;
   sha256: string;
   size: number;
   status: number;
@@ -36,10 +39,13 @@ export interface WebCapturedDocument {
 }
 
 export interface WebCapturedAsset {
+  body?: Uint8Array;
   contentType: string | null;
   finalUrl: string;
+  headers?: Record<string, unknown>;
   kind: string;
   path: string;
+  resourceType?: string;
   sha256: string;
   size: number;
   status: number;
@@ -59,6 +65,9 @@ export interface WebCaptureManifest {
 export interface WebRuntimeDiscovery {
   devtoolsBaseUrl: string;
   launchPlan: WindowsDesktopLaunchPlan;
+  selectedTarget: DevtoolsTargetInfo | null;
+  targetCount: number;
   targets: DevtoolsTargetInfo[];
   version: DevtoolsVersionInfo;
+  capture: DevtoolsNetworkCapture | null;
 }
