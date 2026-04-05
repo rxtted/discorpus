@@ -1,3 +1,4 @@
+import type { ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import path from "node:path";
 
@@ -230,24 +231,17 @@ async function collectDiscordWebRuntimeDiscovery(channel: ReleaseChannel): Promi
 
   try {
     const version = await waitForDevtoolsVersion(devtoolsBaseUrl, { timeoutMs: 15000 });
-    const targets = await waitForDiscordTargets(devtoolsBaseUrl);
-    const selectedTarget = pickRuntimeCaptureTarget(targets);
-    const capture = selectedTarget?.webSocketDebuggerUrl
-      ? await captureDevtoolsNetwork(selectedTarget.webSocketDebuggerUrl, {
-          captureUntilClose: true,
-          reloadOnAttach: false,
-        })
-      : null;
+    const session = await collectRuntimeCaptureSession(devtoolsBaseUrl, child);
     completed = true;
 
     return {
-      capture,
+      capture: session.capture,
       devtoolsBaseUrl,
       launchPlan,
-      selectedTarget,
+      selectedTarget: session.selectedTarget,
       summary: null,
-      targetCount: targets.length,
-      targets,
+      targetCount: session.targets.length,
+      targets: session.targets,
       version,
     };
   } finally {
@@ -255,6 +249,82 @@ async function collectDiscordWebRuntimeDiscovery(channel: ReleaseChannel): Promi
       child.kill();
     }
   }
+}
+
+async function collectRuntimeCaptureSession(
+  baseUrl: string,
+  child: ChildProcess,
+): Promise<Pick<WebRuntimeDiscovery, "capture" | "selectedTarget" | "targets">> {
+  const processExit = waitForProcessExit(child);
+  const resources = new Map<string, DevtoolsCapturedResource>();
+  const seenTargets = new Map<string, DevtoolsTargetInfo>();
+  const attachedTargetIds = new Set<string>();
+  let captureFinishedAt = new Date().toISOString();
+  let captureStartedAt: string | null = null;
+  let selectedTarget: DevtoolsTargetInfo | null = null;
+
+  while (isChildRunning(child)) {
+    let targets: DevtoolsTargetInfo[] = [];
+
+    try {
+      targets = await listDevtoolsTargets(baseUrl);
+    } catch {
+      if (!isChildRunning(child)) {
+        break;
+      }
+
+      await Promise.race([processExit, sleep(500)]);
+      continue;
+    }
+
+    for (const target of targets) {
+      seenTargets.set(target.id, target);
+    }
+
+    const nextTarget = pickNextRuntimeCaptureTarget(targets, attachedTargetIds);
+
+    if (!nextTarget?.webSocketDebuggerUrl) {
+      await Promise.race([processExit, sleep(500)]);
+      continue;
+    }
+
+    attachedTargetIds.add(nextTarget.id);
+
+    if (!selectedTarget || isRemoteDiscordTarget(nextTarget)) {
+      selectedTarget = nextTarget;
+    }
+
+    const capture = await captureDevtoolsNetwork(nextTarget.webSocketDebuggerUrl, {
+      captureUntilClose: true,
+      reloadOnAttach: false,
+    });
+
+    if (!captureStartedAt) {
+      captureStartedAt = capture.startedAt;
+    }
+
+    captureFinishedAt = capture.finishedAt;
+
+    for (const resource of capture.resources) {
+      resources.set(`${nextTarget.id}:${resource.requestId}`, {
+        ...resource,
+        requestId: `${nextTarget.id}:${resource.requestId}`,
+      });
+    }
+  }
+
+  return {
+    capture: captureStartedAt
+      ? {
+          finishedAt: captureFinishedAt,
+          quietPeriodMs: 0,
+          resources: [...resources.values()].sort((left, right) => left.finalUrl.localeCompare(right.finalUrl)),
+          startedAt: captureStartedAt,
+        }
+      : null,
+    selectedTarget,
+    targets: [...seenTargets.values()],
+  };
 }
 
 async function waitForDiscordTargets(baseUrl: string): Promise<ReturnType<typeof listDevtoolsTargets> extends Promise<infer T> ? T : never> {
@@ -273,6 +343,20 @@ async function waitForDiscordTargets(baseUrl: string): Promise<ReturnType<typeof
   }
 
   return lastTargets;
+}
+
+function pickNextRuntimeCaptureTarget(
+  targets: DevtoolsTargetInfo[],
+  attachedTargetIds: Set<string>,
+): DevtoolsTargetInfo | null {
+  const pageTargets = targets.filter((target) => target.type === "page" && target.webSocketDebuggerUrl);
+  const unattachedTargets = pageTargets.filter((target) => !attachedTargetIds.has(target.id));
+
+  if (unattachedTargets.length === 0) {
+    return null;
+  }
+
+  return pickRuntimeCaptureTarget(unattachedTargets);
 }
 
 function selectRuntimeDocument(resources: DevtoolsCapturedResource[], entryUrl: string): WebCapturedDocument | null {
@@ -650,5 +734,19 @@ function sortCountMap(counts: Record<string, number>): Record<string, number> {
 async function sleep(ms: number): Promise<void> {
   await new Promise((resolve) => {
     setTimeout(resolve, ms);
+  });
+}
+
+function isChildRunning(child: ChildProcess): boolean {
+  return child.exitCode === null && child.signalCode === null;
+}
+
+function waitForProcessExit(child: ChildProcess): Promise<void> {
+  if (!isChildRunning(child)) {
+    return Promise.resolve();
+  }
+
+  return new Promise((resolve) => {
+    child.once("exit", () => resolve());
   });
 }
