@@ -92,13 +92,13 @@ async function main(): Promise<void> {
     return;
   }
 
-  if (normalizedArgs[0] === "inspect" && normalizedArgs[1] === "snapshots") {
+  if (normalizedArgs[0] === "list" && normalizedArgs[1] === "snapshots") {
     const layer = parseLayerFromOption(normalizedArgs.slice(2));
-    await runInspectSnapshots(layer, json);
+    await runListSnapshots(layer, json);
     return;
   }
 
-  if (normalizedArgs[0] === "inspect" && normalizedArgs[1] === "list") {
+  if (normalizedArgs[0] === "list" && normalizedArgs[1] === "entries") {
     const snapshotId = normalizedArgs[2];
 
     if (!snapshotId) {
@@ -107,7 +107,7 @@ async function main(): Promise<void> {
       return;
     }
 
-    await runInspectList(snapshotId, json);
+    await runListEntries(snapshotId, json);
     return;
   }
 
@@ -354,7 +354,7 @@ async function runInspectSnapshot(snapshotId: string, json: boolean): Promise<vo
   console.log(`artifact kinds: ${formatArtifactCountRows(counts)}`);
 }
 
-async function runInspectSnapshots(layer: CollectLayer | null, json: boolean): Promise<void> {
+async function runListSnapshots(layer: CollectLayer | null, json: boolean): Promise<void> {
   const dataDir = getCorpusDataDir();
   const db = await ensureCorpusDatabase(dataDir);
   const snapshots = listSnapshots(db.databasePath, layer ?? undefined);
@@ -382,8 +382,6 @@ async function runInspectSnapshots(layer: CollectLayer | null, json: boolean): P
     return;
   }
 
-  console.log("discorpus");
-  console.log(`command: inspect snapshots${layer ? ` --layer ${layer}` : ""}`);
   console.log(`sqlite db: ${db.databasePath}`);
   console.log(`snapshots: ${snapshots.length}`);
 
@@ -392,17 +390,29 @@ async function runInspectSnapshots(layer: CollectLayer | null, json: boolean): P
     return;
   }
 
+  console.log("");
+
   let currentChannel: string | null = null;
+  let currentLayer: string | null = null;
+  let currentChannelSnapshotCount = 0;
 
   for (const snapshot of snapshots) {
     if (snapshot.channel !== currentChannel) {
       currentChannel = snapshot.channel;
-      console.log(`${currentChannel}:`);
+      currentLayer = null;
+      currentChannelSnapshotCount = snapshots.filter((item) => item.channel === currentChannel).length;
+      console.log(`${currentChannel} (${currentChannelSnapshotCount})`);
+    }
+
+    if (snapshot.layer !== currentLayer) {
+      currentLayer = snapshot.layer;
+      console.log(`├─ ${currentLayer}`);
     }
 
     const dirName = formatSnapshotDirName(snapshot.id);
-    const version = [snapshot.release_id ?? snapshot.channel, snapshot.app_version ?? "unknown"].join(" ");
-    console.log(`${dirName} ${snapshot.layer} ${snapshot.observed_at} ${version}`);
+    const version = snapshot.app_version ?? "unknown";
+    const releaseId = snapshot.release_id ?? snapshot.channel;
+    console.log(`│  └─ ${dirName}  ${releaseId} ${version}  ${snapshot.observed_at}`);
   }
 }
 
@@ -443,7 +453,7 @@ async function runFindArtifact(
   }
 }
 
-async function runInspectList(snapshotId: string, json: boolean): Promise<void> {
+async function runListEntries(snapshotId: string, json: boolean): Promise<void> {
   const db = await ensureCorpusDatabase(getCorpusDataDir());
   const snapshot = getSnapshotByIdOrDirName(db.databasePath, snapshotId);
 
@@ -468,7 +478,7 @@ async function runInspectList(snapshotId: string, json: boolean): Promise<void> 
   }
 
   console.log("discorpus");
-  console.log(`command: inspect list ${snapshotId}`);
+  console.log(`command: list entries ${snapshotId}`);
   console.log(`snapshot id: ${snapshot.id}`);
   console.log(`archives: ${archives.length}`);
 
@@ -1145,10 +1155,10 @@ function summarizeArchiveTopLevelEntries(
 
 function printUsage(): void {
   console.error("usage: discorpus collect <desktop|web> --channel <stable|ptb|canary>");
+  console.error("usage: discorpus list snapshots [--layer <desktop|web>]");
+  console.error("usage: discorpus list entries <snapshot-id>");
   console.error("usage: discorpus inspect latest --channel <stable|ptb|canary> --layer <desktop|web>");
-  console.error("usage: discorpus inspect snapshots [--layer <desktop|web>]");
   console.error("usage: discorpus inspect snapshot <snapshot-id>");
-  console.error("usage: discorpus inspect list <snapshot-id>");
   console.error("usage: discorpus inspect archive <snapshot-id> --name <archive-name>");
   console.error("usage: discorpus find artifact [--sha256 <hash>] [--kind <kind>] [--path <path-fragment>]");
   console.error("usage: discorpus diff latest --channel <stable|ptb|canary> --layer <desktop|web>");
