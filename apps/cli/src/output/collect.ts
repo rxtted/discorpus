@@ -84,6 +84,7 @@ export function printWebManifest(records: CliArtifactRecord[], manifest: WebCapt
     console.log(`web devtools url: ${manifest.runtimeDiscovery.devtoolsBaseUrl}`);
     console.log(`web runtime browser: ${manifest.runtimeDiscovery.version.browser}`);
     console.log(`web runtime targets: ${manifest.runtimeDiscovery.targets.length}`);
+    console.log(`web runtime captured resources: ${manifest.runtimeDiscovery.capture?.resources.length ?? 0}`);
   }
 
   for (const asset of manifest.assets.slice(0, 12)) {
