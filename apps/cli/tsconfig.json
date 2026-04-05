@@ -10,6 +10,7 @@
     { "path": "../../packages/core" },
     { "path": "../../packages/db" },
     { "path": "../../packages/platform-windows" },
+    { "path": "../../packages/runtime-cdp" },
     { "path": "../../packages/storage" },
     { "path": "../../packages/targets-discord" },
     { "path": "../../packages/versioning" }
