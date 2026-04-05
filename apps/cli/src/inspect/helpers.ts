@@ -1,26 +1,13 @@
 import path from "node:path";
 
-import type { ArtifactRow, ArtifactSearchRow } from "@discorpus/db";
+import type { ArtifactRow, ArtifactSearchRow, LatestSnapshotRow, SnapshotListRow } from "@discorpus/db";
 import { createSnapshotDirName } from "@discorpus/storage";
 
 import type { ArchiveEntry, ArtifactDiff, InspectableEntry, SnapshotArtifact } from "../types/inspect.js";
 import { countKinds, toPosixPath } from "../shared.js";
 
 export function createSnapshotSummaryResult(
-  snapshot: {
-    app_version: string | null;
-    channel: string;
-    corpus_version_id: string;
-    id: string;
-    is_new_corpus_version: number;
-    is_new_upstream_version: number;
-    layer: string;
-    observed_at: string;
-    platform: string;
-    release_id: string | null;
-    target: string;
-    upstream_version_id: string;
-  },
+  snapshot: LatestSnapshotRow,
   dbPath: string,
   artifactKindCounts: Record<string, number>,
 ): Record<string, unknown> {
@@ -42,19 +29,7 @@ export function createSnapshotSummaryResult(
   };
 }
 
-export function createSnapshotListItem(snapshot: {
-  app_version: string | null;
-  channel: string;
-  corpus_version_id: string;
-  id: string;
-  is_new_corpus_version: number;
-  is_new_upstream_version: number;
-  layer: string;
-  observed_at: string;
-  platform: string;
-  release_id: string | null;
-  target: string;
-}): Record<string, unknown> {
+export function createSnapshotListItem(snapshot: SnapshotListRow): Record<string, unknown> {
   return {
     appVersion: snapshot.app_version,
     channel: snapshot.channel,
