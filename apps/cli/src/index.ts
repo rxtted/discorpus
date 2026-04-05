@@ -4,8 +4,10 @@ import { formatSnapshotKey, type CorpusLayer, type ReleaseChannel, type VersionS
 import {
   ensureCorpusDatabase,
   findArtifacts,
+  getArtifactsBySnapshotId,
   getArtifactKindCounts,
   getLatestSnapshot,
+  getPreviousSnapshot,
   getSnapshotByIdOrDirName,
   indexSnapshot,
 } from "@discorpus/db";
@@ -79,6 +81,20 @@ async function main(): Promise<void> {
     }
 
     await runFindArtifact({ kind, pathFragment, sha256 }, json);
+    return;
+  }
+
+  if (normalizedArgs[0] === "diff" && normalizedArgs[1] === "latest") {
+    const layer = parseLayerFromOption(normalizedArgs.slice(2));
+    const channel = parseChannel(normalizedArgs.slice(2));
+
+    if (!layer || !channel) {
+      printUsage();
+      process.exitCode = 1;
+      return;
+    }
+
+    await runDiffLatest(layer, channel, json);
     return;
   }
 
@@ -298,6 +314,81 @@ async function runFindArtifact(
     console.log(`observed at: ${result.observed_at}`);
     console.log(`sha256: ${result.sha256}`);
     console.log(`blob: ${result.blob_path ?? "none"}`);
+  }
+}
+
+async function runDiffLatest(layer: CollectLayer, channel: ReleaseChannel, json: boolean): Promise<void> {
+  const db = await ensureCorpusDatabase(path.join(process.cwd(), "data"));
+  const latest = getLatestSnapshot(db.databasePath, channel, layer);
+
+  if (!latest) {
+    console.error(`no indexed snapshot found for channel ${channel} and layer ${layer}`);
+    process.exitCode = 1;
+    return;
+  }
+
+  const previous = getPreviousSnapshot(db.databasePath, channel, layer, latest.observed_at);
+
+  if (!previous) {
+    const result = {
+      channel,
+      currentSnapshotId: latest.id,
+      layer,
+      previousSnapshotId: null,
+      reason: "no previous snapshot in lineage",
+    };
+
+    if (json) {
+      console.log(JSON.stringify(result, null, 2));
+      return;
+    }
+
+    console.log("discorpus");
+    console.log(`command: diff latest --channel ${channel} --layer ${layer}`);
+    console.log(`current snapshot: ${latest.id}`);
+    console.log("previous snapshot: none");
+    console.log("status: no previous snapshot in lineage");
+    return;
+  }
+
+  const latestArtifacts = getArtifactsBySnapshotId(db.databasePath, latest.id);
+  const previousArtifacts = getArtifactsBySnapshotId(db.databasePath, previous.id);
+  const diff = diffArtifacts(previousArtifacts, latestArtifacts);
+  const result = {
+    added: diff.added,
+    changed: diff.changed,
+    channel,
+    currentSnapshotId: latest.id,
+    layer,
+    previousSnapshotId: previous.id,
+    removed: diff.removed,
+  };
+
+  if (json) {
+    console.log(JSON.stringify(result, null, 2));
+    return;
+  }
+
+  console.log("discorpus");
+  console.log(`command: diff latest --channel ${channel} --layer ${layer}`);
+  console.log(`current snapshot: ${latest.id}`);
+  console.log(`previous snapshot: ${previous.id}`);
+  console.log(`added: ${diff.added.length}`);
+  console.log(`removed: ${diff.removed.length}`);
+  console.log(`changed: ${diff.changed.length}`);
+
+  for (const item of diff.added.slice(0, 10)) {
+    console.log(`added ${item.kind} ${item.path}`);
+  }
+
+  for (const item of diff.removed.slice(0, 10)) {
+    console.log(`removed ${item.kind} ${item.path}`);
+  }
+
+  for (const item of diff.changed.slice(0, 10)) {
+    console.log(`changed ${item.current.path}`);
+    console.log(`from: ${item.previous.sha256}`);
+    console.log(`to: ${item.current.sha256}`);
   }
 }
 
@@ -547,11 +638,58 @@ function parseOption(args: string[], name: string): string | undefined {
   return args[index + 1];
 }
 
+function diffArtifacts(
+  previousArtifacts: Array<{
+    kind: string;
+    path: string;
+    sha256: string;
+  }>,
+  currentArtifacts: Array<{
+    kind: string;
+    path: string;
+    sha256: string;
+  }>,
+): {
+  added: typeof currentArtifacts;
+  changed: Array<{
+    current: (typeof currentArtifacts)[number];
+    previous: (typeof previousArtifacts)[number];
+  }>;
+  removed: typeof previousArtifacts;
+} {
+  const previousByPath = new Map(previousArtifacts.map((artifact) => [artifact.path, artifact]));
+  const currentByPath = new Map(currentArtifacts.map((artifact) => [artifact.path, artifact]));
+
+  const added = currentArtifacts.filter((artifact) => !previousByPath.has(artifact.path));
+  const removed = previousArtifacts.filter((artifact) => !currentByPath.has(artifact.path));
+  const changed = currentArtifacts
+    .map((artifact) => {
+      const previous = previousByPath.get(artifact.path);
+
+      if (!previous || previous.sha256 === artifact.sha256) {
+        return null;
+      }
+
+      return {
+        current: artifact,
+        previous,
+      };
+    })
+    .filter((value): value is NonNullable<typeof value> => value !== null);
+
+  return {
+    added,
+    removed,
+    changed,
+  };
+}
+
 function printUsage(): void {
   console.error("usage: discorpus collect <desktop|web> --channel <stable|ptb|canary>");
   console.error("usage: discorpus inspect latest --channel <stable|ptb|canary> --layer <desktop|web>");
   console.error("usage: discorpus inspect snapshot <snapshot-id>");
   console.error("usage: discorpus find artifact [--sha256 <hash>] [--kind <kind>] [--path <path-fragment>]");
+  console.error("usage: discorpus diff latest --channel <stable|ptb|canary> --layer <desktop|web>");
   console.error("optional: add --json for structured output");
 }
 

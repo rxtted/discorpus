@@ -59,6 +59,18 @@ export interface ArtifactSearchRow {
   target: string;
 }
 
+export interface ArtifactRow {
+  blob_kind: string | null;
+  blob_path: string | null;
+  id: string;
+  kind: string;
+  path: string;
+  sha256: string;
+  size: number;
+  snapshot_id: string;
+  source: string;
+}
+
 export async function ensureCorpusDatabase(baseDir: string): Promise<DbPaths> {
   await mkdir(baseDir, { recursive: true });
 
@@ -133,6 +145,41 @@ export function getLatestSnapshot(
   }
 }
 
+export function getPreviousSnapshot(
+  databasePath: string,
+  channel: string,
+  layer: string,
+  observedAt: string,
+): LatestSnapshotRow | null {
+  const database = new DatabaseSync(databasePath);
+
+  try {
+    const row = database.prepare(`
+      select
+        id,
+        target,
+        channel,
+        platform,
+        layer,
+        observed_at,
+        app_version,
+        release_id,
+        upstream_version_id,
+        corpus_version_id,
+        is_new_upstream_version,
+        is_new_corpus_version
+      from snapshots
+      where channel = ? and layer = ? and observed_at < ?
+      order by observed_at desc
+      limit 1
+    `).get(channel, layer, observedAt);
+
+    return ((row as unknown) as LatestSnapshotRow | undefined) ?? null;
+  } finally {
+    database.close();
+  }
+}
+
 export function getArtifactKindCounts(
   databasePath: string,
   snapshotId: string,
@@ -149,6 +196,35 @@ export function getArtifactKindCounts(
     `).all(snapshotId);
 
     return (rows as unknown) as ArtifactKindCountRow[];
+  } finally {
+    database.close();
+  }
+}
+
+export function getArtifactsBySnapshotId(
+  databasePath: string,
+  snapshotId: string,
+): ArtifactRow[] {
+  const database = new DatabaseSync(databasePath);
+
+  try {
+    const rows = database.prepare(`
+      select
+        id,
+        snapshot_id,
+        kind,
+        path,
+        sha256,
+        size,
+        source,
+        blob_kind,
+        blob_path
+      from artifacts
+      where snapshot_id = ?
+      order by path asc
+    `).all(snapshotId);
+
+    return (rows as unknown) as ArtifactRow[];
   } finally {
     database.close();
   }
