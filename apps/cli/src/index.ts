@@ -51,6 +51,12 @@ async function main(): Promise<void> {
   const json = args.includes("--json");
   const normalizedArgs = args.filter((value) => value !== "--json");
 
+  if (normalizedArgs[0] === "snapshots") {
+    const layer = parseLayerFromOption(normalizedArgs.slice(1));
+    await runListSnapshots(layer, json);
+    return;
+  }
+
   if (normalizedArgs[0] === "collect") {
     const layer = parseLayer(normalizedArgs[1]);
     const channel = parseChannel(normalizedArgs.slice(2));
@@ -65,63 +71,85 @@ async function main(): Promise<void> {
     return;
   }
 
-  if (normalizedArgs[0] === "inspect" && normalizedArgs[1] === "latest") {
-    const layer = parseLayerFromOption(normalizedArgs.slice(2));
-    const channel = parseChannel(normalizedArgs.slice(2));
+  if (normalizedArgs[0] === "snapshot") {
+    const selector = normalizedArgs[1];
 
-    if (!layer || !channel) {
+    if (!selector) {
       printUsage();
       process.exitCode = 1;
       return;
     }
 
-    await runInspectLatest(layer, channel, json);
+    if (selector === "latest") {
+      const layer = parseLayerFromOption(normalizedArgs.slice(2));
+      const channel = parseChannel(normalizedArgs.slice(2));
+
+      if (!layer || !channel) {
+        printUsage();
+        process.exitCode = 1;
+        return;
+      }
+
+      await runInspectLatest(layer, channel, json);
+      return;
+    }
+
+    await runInspectSnapshot(selector, json);
     return;
   }
 
-  if (normalizedArgs[0] === "inspect" && normalizedArgs[1] === "snapshot") {
-    const snapshotId = normalizedArgs[2];
+  if (normalizedArgs[0] === "entries") {
+    const selector = normalizedArgs[1];
 
-    if (!snapshotId) {
+    if (!selector) {
       printUsage();
       process.exitCode = 1;
       return;
     }
 
-    await runInspectSnapshot(snapshotId, json);
+    if (selector === "latest") {
+      const layer = parseLayerFromOption(normalizedArgs.slice(2));
+      const channel = parseChannel(normalizedArgs.slice(2));
+
+      if (!layer || !channel) {
+        printUsage();
+        process.exitCode = 1;
+        return;
+      }
+
+      await runListEntriesForLatest(layer, channel, json);
+      return;
+    }
+
+    await runListEntries(selector, json);
     return;
   }
 
-  if (normalizedArgs[0] === "list" && normalizedArgs[1] === "snapshots") {
-    const layer = parseLayerFromOption(normalizedArgs.slice(2));
-    await runListSnapshots(layer, json);
-    return;
-  }
+  if (normalizedArgs[0] === "archive") {
+    const selector = normalizedArgs[1];
+    const archiveName = normalizedArgs[2];
 
-  if (normalizedArgs[0] === "list" && normalizedArgs[1] === "entries") {
-    const snapshotId = normalizedArgs[2];
-
-    if (!snapshotId) {
+    if (!selector || !archiveName) {
       printUsage();
       process.exitCode = 1;
       return;
     }
 
-    await runListEntries(snapshotId, json);
-    return;
-  }
+    if (selector === "latest") {
+      const layer = parseLayerFromOption(normalizedArgs.slice(3));
+      const channel = parseChannel(normalizedArgs.slice(3));
 
-  if (normalizedArgs[0] === "inspect" && normalizedArgs[1] === "archive") {
-    const snapshotId = normalizedArgs[2];
-    const archiveName = parseOption(normalizedArgs.slice(3), "--name");
+      if (!layer || !channel) {
+        printUsage();
+        process.exitCode = 1;
+        return;
+      }
 
-    if (!snapshotId || !archiveName) {
-      printUsage();
-      process.exitCode = 1;
+      await runInspectArchiveForLatest(layer, channel, archiveName, json);
       return;
     }
 
-    await runInspectArchive(snapshotId, archiveName, json);
+    await runInspectArchive(selector, archiveName, json);
     return;
   }
 
@@ -302,6 +330,25 @@ async function runInspectLatest(layer: CollectLayer, channel: ReleaseChannel, js
   console.log(`artifact kinds: ${formatArtifactCountRows(counts)}`);
 }
 
+async function runListEntriesForLatest(
+  layer: CollectLayer,
+  channel: ReleaseChannel,
+  json: boolean,
+): Promise<void> {
+  const snapshot = await requireLatestSnapshot(channel, layer);
+  await runListEntries(snapshot.id, json);
+}
+
+async function runInspectArchiveForLatest(
+  layer: CollectLayer,
+  channel: ReleaseChannel,
+  archiveName: string,
+  json: boolean,
+): Promise<void> {
+  const snapshot = await requireLatestSnapshot(channel, layer);
+  await runInspectArchive(snapshot.id, archiveName, json);
+}
+
 async function runInspectSnapshot(snapshotId: string, json: boolean): Promise<void> {
   const db = await ensureCorpusDatabase(getCorpusDataDir());
   const snapshot = getSnapshotByIdOrDirName(db.databasePath, snapshotId);
@@ -392,27 +439,31 @@ async function runListSnapshots(layer: CollectLayer | null, json: boolean): Prom
 
   console.log("");
 
+  const channelCounts = new Map<string, number>();
+
+  for (const snapshot of snapshots) {
+    channelCounts.set(snapshot.channel, (channelCounts.get(snapshot.channel) ?? 0) + 1);
+  }
+
   let currentChannel: string | null = null;
   let currentLayer: string | null = null;
-  let currentChannelSnapshotCount = 0;
 
   for (const snapshot of snapshots) {
     if (snapshot.channel !== currentChannel) {
       currentChannel = snapshot.channel;
       currentLayer = null;
-      currentChannelSnapshotCount = snapshots.filter((item) => item.channel === currentChannel).length;
-      console.log(`${currentChannel} (${currentChannelSnapshotCount})`);
+      console.log(`- ${currentChannel} [${formatCount(channelCounts.get(currentChannel) ?? 0, "snapshot")}]`);
     }
 
     if (snapshot.layer !== currentLayer) {
       currentLayer = snapshot.layer;
-      console.log(`├─ ${currentLayer}`);
+      console.log(`  ├─ ${currentLayer}`);
     }
 
     const dirName = formatSnapshotDirName(snapshot.id);
     const version = snapshot.app_version ?? "unknown";
     const releaseId = snapshot.release_id ?? snapshot.channel;
-    console.log(`│  └─ ${dirName}  ${releaseId} ${version}  ${snapshot.observed_at}`);
+    console.log(`  │  └─ ${dirName}  ${releaseId} ${version}  ${snapshot.observed_at}`);
   }
 }
 
@@ -477,19 +528,28 @@ async function runListEntries(snapshotId: string, json: boolean): Promise<void> 
     return;
   }
 
-  console.log("discorpus");
-  console.log(`command: list entries ${snapshotId}`);
+  console.log(`sqlite db: ${db.databasePath}`);
   console.log(`snapshot id: ${snapshot.id}`);
-  console.log(`archives: ${archives.length}`);
+  console.log("");
+  console.log(`- archives [${formatCount(archives.length, "archive")}]`);
 
-  for (const archive of archives) {
-    console.log(`${archive.name} ${archive.path}`);
+  if (archives.length === 0) {
+    console.log("  └─ none");
+  } else {
+    for (const archive of archives) {
+      console.log(`  └─ ${archive.name}  ${archive.path}`);
+    }
   }
 
-  console.log(`files: ${files.length}`);
+  console.log(`- files [${formatCount(files.length, "file")}]`);
+
+  if (files.length === 0) {
+    console.log("  └─ none");
+    return;
+  }
 
   for (const file of files.slice(0, 40)) {
-    console.log(`${file.kind} ${file.path}`);
+    console.log(`  └─ ${file.kind}  ${file.path}`);
   }
 }
 
@@ -1155,11 +1215,13 @@ function summarizeArchiveTopLevelEntries(
 
 function printUsage(): void {
   console.error("usage: discorpus collect <desktop|web> --channel <stable|ptb|canary>");
-  console.error("usage: discorpus list snapshots [--layer <desktop|web>]");
-  console.error("usage: discorpus list entries <snapshot-id>");
-  console.error("usage: discorpus inspect latest --channel <stable|ptb|canary> --layer <desktop|web>");
-  console.error("usage: discorpus inspect snapshot <snapshot-id>");
-  console.error("usage: discorpus inspect archive <snapshot-id> --name <archive-name>");
+  console.error("usage: discorpus snapshots [--layer <desktop|web>]");
+  console.error("usage: discorpus snapshot <snapshot-id>");
+  console.error("usage: discorpus snapshot latest --channel <stable|ptb|canary> --layer <desktop|web>");
+  console.error("usage: discorpus entries <snapshot-id>");
+  console.error("usage: discorpus entries latest --channel <stable|ptb|canary> --layer <desktop|web>");
+  console.error("usage: discorpus archive <snapshot-id> <archive-name>");
+  console.error("usage: discorpus archive latest <archive-name> --channel <stable|ptb|canary> --layer <desktop|web>");
   console.error("usage: discorpus find artifact [--sha256 <hash>] [--kind <kind>] [--path <path-fragment>]");
   console.error("usage: discorpus diff latest --channel <stable|ptb|canary> --layer <desktop|web>");
   console.error("optional: add --json for structured output");
@@ -1241,6 +1303,26 @@ function toPosixPath(value: string): string {
 
 function formatSnapshotDirName(snapshotId: string): string {
   return createSnapshotDirName(snapshotId);
+}
+
+function formatCount(count: number, singular: string): string {
+  return `${count} ${singular}${count === 1 ? "" : "s"}`;
+}
+
+async function requireLatestSnapshot(
+  channel: ReleaseChannel,
+  layer: CollectLayer,
+): Promise<NonNullable<ReturnType<typeof getLatestSnapshot>>> {
+  const db = await ensureCorpusDatabase(getCorpusDataDir());
+  const snapshot = getLatestSnapshot(db.databasePath, channel, layer);
+
+  if (!snapshot) {
+    console.error(`no indexed snapshot found for channel ${channel} and layer ${layer}`);
+    process.exitCode = 1;
+    throw new Error("latest snapshot not found");
+  }
+
+  return snapshot;
 }
 
 function getCorpusDataDir(env: NodeJS.ProcessEnv = process.env): string {
