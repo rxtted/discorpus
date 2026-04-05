@@ -89,7 +89,7 @@ export async function collectDiscordWebManifest(channel: ReleaseChannel): Promis
   const html = decodeUtf8Body(runtimeDocument.body);
   const runtimeAssets = collectRuntimeAssets(runtimeDiscovery.capture?.resources ?? [], runtimeDocument);
   const fallbackAssetUrls = discoverWebAssetUrls(html, runtimeDocument.finalUrl);
-  const mergedAssets = mergeRuntimeAndFallbackAssets(runtimeAssets, fallbackAssetUrls);
+  const mergedAssets = await mergeRuntimeAndFallbackAssets(runtimeAssets, fallbackAssetUrls);
 
   return {
     assetUrls: mergedAssets.map((asset) => asset.finalUrl),
@@ -287,8 +287,10 @@ function selectRuntimeDocument(resources: DevtoolsCapturedResource[], entryUrl: 
 }
 
 function collectRuntimeAssets(resources: DevtoolsCapturedResource[], document: WebCapturedDocument): WebCapturedAsset[] {
+  const documentOrigin = new URL(document.finalUrl).origin;
+
   return resources
-    .filter((resource) => resource.body && resource.finalUrl !== document.finalUrl && resource.status !== null)
+    .filter((resource) => isPromotableDiscordResource(resource, documentOrigin, document.finalUrl))
     .map((resource) => ({
       body: resource.body ?? undefined,
       contentType: resource.contentType,
@@ -306,7 +308,7 @@ function collectRuntimeAssets(resources: DevtoolsCapturedResource[], document: W
     .sort((left, right) => left.path.localeCompare(right.path));
 }
 
-function mergeRuntimeAndFallbackAssets(runtimeAssets: WebCapturedAsset[], fallbackAssetUrls: string[]): WebCapturedAsset[] {
+async function mergeRuntimeAndFallbackAssets(runtimeAssets: WebCapturedAsset[], fallbackAssetUrls: string[]): Promise<WebCapturedAsset[]> {
   const assetsByUrl = new Map(runtimeAssets.map((asset) => [asset.finalUrl, asset]));
 
   for (const assetUrl of fallbackAssetUrls) {
@@ -314,17 +316,7 @@ function mergeRuntimeAndFallbackAssets(runtimeAssets: WebCapturedAsset[], fallba
       continue;
     }
 
-    assetsByUrl.set(assetUrl, {
-      contentType: null,
-      finalUrl: assetUrl,
-      kind: classifyWebArtifact(assetUrl, null, "Other"),
-      path: createWebArtifactPath(assetUrl),
-      resourceType: "Other",
-      sha256: "",
-      size: 0,
-      status: 0,
-      url: assetUrl,
-    });
+    assetsByUrl.set(assetUrl, await fetchWebAsset(assetUrl));
   }
 
   return [...assetsByUrl.values()].sort((left, right) => left.path.localeCompare(right.path));
@@ -338,6 +330,22 @@ function classifyWebArtifact(url: string, contentType: string | null, resourceTy
     return "web_document";
   }
 
+  if (extension === ".map") {
+    return "web_source_map";
+  }
+
+  if (extension === ".wasm" || normalizedContentType.includes("wasm")) {
+    return "web_wasm";
+  }
+
+  if (extension === ".woff" || extension === ".woff2" || extension === ".ttf" || normalizedContentType.startsWith("font/")) {
+    return "web_font";
+  }
+
+  if (extension === ".png" || extension === ".jpg" || extension === ".jpeg" || extension === ".gif" || extension === ".webp" || extension === ".svg" || extension === ".ico" || normalizedContentType.startsWith("image/")) {
+    return "web_image";
+  }
+
   if (resourceType === "Script" || normalizedContentType.includes("javascript") || extension === ".js" || extension === ".mjs") {
     return "web_script";
   }
@@ -348,14 +356,6 @@ function classifyWebArtifact(url: string, contentType: string | null, resourceTy
 
   if (resourceType === "XHR" || resourceType === "Fetch" || normalizedContentType.includes("json") || extension === ".json") {
     return "web_json";
-  }
-
-  if (extension === ".map") {
-    return "web_source_map";
-  }
-
-  if (normalizedContentType.startsWith("image/") || normalizedContentType.startsWith("font/") || extension === ".ico") {
-    return "web_asset";
   }
 
   return resourceType === "Other" ? "web_asset" : "web_unknown";
@@ -468,6 +468,62 @@ function hashBuffer(buffer: Uint8Array): string {
 
 function sanitizePathComponent(value: string): string {
   return value.replace(/[^a-z0-9._-]+/gi, "_");
+}
+
+function isPromotableDiscordResource(
+  resource: DevtoolsCapturedResource,
+  documentOrigin: string,
+  documentUrl: string,
+): boolean {
+  if (!resource.body || resource.status === null || resource.status < 200 || resource.status >= 400) {
+    return false;
+  }
+
+  if (resource.resourceType === "Preflight" || resource.resourceType === "WebSocket" || resource.resourceType === "Manifest") {
+    return false;
+  }
+
+  if (resource.finalUrl === documentUrl) {
+    return false;
+  }
+
+  let parsedUrl: URL;
+
+  try {
+    parsedUrl = new URL(resource.finalUrl);
+  } catch {
+    return false;
+  }
+
+  if (parsedUrl.origin !== documentOrigin) {
+    return false;
+  }
+
+  if (parsedUrl.pathname.startsWith("/assets/")) {
+    return true;
+  }
+
+  if (resource.resourceType === "Script" || resource.resourceType === "Stylesheet") {
+    return true;
+  }
+
+  const extension = path.posix.extname(parsedUrl.pathname).toLowerCase();
+
+  return extension === ".js" ||
+    extension === ".mjs" ||
+    extension === ".css" ||
+    extension === ".map" ||
+    extension === ".wasm" ||
+    extension === ".woff" ||
+    extension === ".woff2" ||
+    extension === ".ttf" ||
+    extension === ".svg" ||
+    extension === ".png" ||
+    extension === ".jpg" ||
+    extension === ".jpeg" ||
+    extension === ".gif" ||
+    extension === ".webp" ||
+    extension === ".ico";
 }
 
 function decodeUtf8Body(body: Uint8Array | undefined): string {
