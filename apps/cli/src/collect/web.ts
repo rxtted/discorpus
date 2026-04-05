@@ -21,6 +21,7 @@ import type {
   WebCapturedDocument,
   WebExcludedAsset,
   WebMissedAsset,
+  WebRuntimeChunkManifest,
   WebRuntimeDiscovery,
   WebRuntimeSummary,
 } from "../types/collect.js";
@@ -96,7 +97,9 @@ export async function collectDiscordWebManifest(channel: ReleaseChannel): Promis
   const html = decodeUtf8Body(document.body);
   const bootstrapChunkManifest = parseBootstrapChunkManifest(html);
   const { assets: runtimeAssets, excludedAssets, missedAssets, missedWebpackAssets } = await collectRuntimeAssets(capturedResources, document);
-  const assets = await mergeDeclaredShellAssets(runtimeAssets, bootstrapChunkManifest, document.finalUrl);
+  const declaredAssets = await mergeDeclaredShellAssets(runtimeAssets, bootstrapChunkManifest, document.finalUrl);
+  const runtimeChunkManifest = extractRuntimeChunkManifest(declaredAssets);
+  const assets = await mergeRuntimeMapAssets(declaredAssets, runtimeChunkManifest, document.finalUrl);
   runtimeDiscovery.summary = summarizeRuntimeCapture(
     capturedResources,
     document,
@@ -117,6 +120,7 @@ export async function collectDiscordWebManifest(channel: ReleaseChannel): Promis
     excludedAssets,
     missedAssets,
     missedWebpackAssets,
+    runtimeChunkManifest,
     runtimeDiscovery,
   };
 }
@@ -562,6 +566,7 @@ function summarizeRuntimeCapture(
   let capturedWithBodyCount = 0;
   let declaredAssetCount = 0;
   let promotableResourceCount = 0;
+  let runtimeMapAssetCount = 0;
   let sameOriginResourceCount = 0;
   let sameOriginWithBodyCount = 0;
 
@@ -597,6 +602,10 @@ function summarizeRuntimeCapture(
     if (asset.provenance === "declared") {
       declaredAssetCount += 1;
     }
+
+    if (asset.provenance === "runtime_map") {
+      runtimeMapAssetCount += 1;
+    }
   }
 
   return {
@@ -613,6 +622,7 @@ function summarizeRuntimeCapture(
     promotedAssetCount: promotedAssets.length,
     promotedKinds: sortCountMap(countAssetKinds(promotedAssets)),
     resourceTypes: sortCountMap(resourceTypes),
+    runtimeMapAssetCount,
     sameOriginResourceCount,
     sameOriginWithBodyCount,
   };
@@ -1188,6 +1198,214 @@ async function mergeDeclaredShellAssets(
   }
 
   return [...assetsByPath.values()].sort((left, right) => left.path.localeCompare(right.path));
+}
+
+async function mergeRuntimeMapAssets(
+  assets: WebCapturedAsset[],
+  runtimeChunkManifest: WebRuntimeChunkManifest,
+  documentUrl: string,
+): Promise<WebCapturedAsset[]> {
+  const assetsByPath = new Map(assets.map((asset) => [asset.path, asset]));
+
+  for (const url of runtimeChunkManifest.derivedUrls) {
+    let resolvedUrl: URL;
+
+    try {
+      resolvedUrl = new URL(url, documentUrl);
+    } catch {
+      continue;
+    }
+
+    if (!isDeclaredShellAssetUrl(resolvedUrl)) {
+      continue;
+    }
+
+    const finalUrl = resolvedUrl.toString();
+    const path = createWebArtifactPath(finalUrl);
+    const runtimeMapSources = runtimeChunkManifest.chunkMaps
+      .filter((item) => runtimeChunkManifestUrlMatchesMap(item, finalUrl))
+      .map((item) => item.sourcePath)
+      .sort();
+    const existing = assetsByPath.get(path);
+
+    if (existing) {
+      if (!existing.runtimeMapSources?.length && runtimeMapSources.length > 0) {
+        existing.runtimeMapSources = runtimeMapSources;
+      }
+      continue;
+    }
+
+    let body: Uint8Array;
+
+    try {
+      body = await fetchBuffer(finalUrl);
+    } catch {
+      continue;
+    }
+
+    if (body.length === 0) {
+      continue;
+    }
+
+    const resourceType = inferDeclaredResourceType(finalUrl);
+    const kind = classifyWebArtifact(finalUrl, null, resourceType);
+
+    if (kind === "web_unknown") {
+      continue;
+    }
+
+    assetsByPath.set(path, {
+      body,
+      contentType: null,
+      declarationKinds: [],
+      finalUrl,
+      kind,
+      path,
+      provenance: "runtime_map",
+      resourceType,
+      runtimeMapSources,
+      sha256: hashBuffer(body),
+      size: body.length,
+      status: 200,
+      url: finalUrl,
+    });
+  }
+
+  return [...assetsByPath.values()].sort((left, right) => left.path.localeCompare(right.path));
+}
+
+function extractRuntimeChunkManifest(assets: WebCapturedAsset[]): WebRuntimeChunkManifest {
+  const derivedUrls = new Set<string>();
+  const sourceMapUrls = new Set<string>();
+  const chunkMaps: WebRuntimeChunkManifest["chunkMaps"] = [];
+
+  for (const asset of assets) {
+    if (asset.kind !== "web_script" || !asset.body) {
+      continue;
+    }
+
+    const text = decodeUtf8Body(asset.body);
+
+    for (const url of extractSourceMapUrls(text, asset.finalUrl)) {
+      sourceMapUrls.add(url);
+      derivedUrls.add(url);
+    }
+
+    for (const chunkMap of extractChunkMaps(text)) {
+      chunkMaps.push({
+        inferredExtension: chunkMap.inferredExtension,
+        sampleEntries: chunkMap.entries.slice(0, 25).map(([chunkId, hash]) => ({ chunkId, hash })),
+        sourcePath: asset.path,
+      });
+
+      for (const [chunkId, hash] of chunkMap.entries) {
+        derivedUrls.add(createDiscordAssetUrl(chunkId, hash, chunkMap.inferredExtension));
+      }
+    }
+  }
+
+  return {
+    chunkMaps: chunkMaps.sort((left, right) => left.sourcePath.localeCompare(right.sourcePath)),
+    derivedUrls: [...derivedUrls].sort(),
+    sourceMapUrls: [...sourceMapUrls].sort(),
+  };
+}
+
+function extractChunkMaps(text: string): Array<{ entries: Array<[string, string]>; inferredExtension: ".css" | ".js" }> {
+  const matches = [...text.matchAll(/[,{]\s*(\d{1,6})\s*:\s*"([0-9a-f]{6,20})"/g)];
+  const groups: Array<{ entries: Array<[string, string]>; inferredExtension: ".css" | ".js" }> = [];
+  let current: Array<[string, string]> = [];
+  let lastIndex = -1000;
+  let groupStart = 0;
+
+  for (const match of matches) {
+    if (current.length > 0 && match.index - lastIndex > 8) {
+      pushChunkMapGroup(groups, current, text, groupStart, lastIndex);
+      current = [];
+      groupStart = match.index;
+    }
+
+    if (current.length === 0) {
+      groupStart = match.index;
+    }
+
+    current.push([match[1], match[2]]);
+    lastIndex = match.index + match[0].length;
+  }
+
+  pushChunkMapGroup(groups, current, text, groupStart, lastIndex);
+  return dedupeChunkMapGroups(groups);
+}
+
+function pushChunkMapGroup(
+  groups: Array<{ entries: Array<[string, string]>; inferredExtension: ".css" | ".js" }>,
+  entries: Array<[string, string]>,
+  text: string,
+  start: number,
+  end: number,
+): void {
+  if (entries.length < 10) {
+    return;
+  }
+
+  const context = text.slice(Math.max(0, start - 300), Math.min(text.length, end + 300));
+  const inferredExtension: ".css" | ".js" = /\.css["'`]/.test(context) && !/\.js["'`]/.test(context) ? ".css" : ".js";
+  groups.push({ entries: [...entries], inferredExtension });
+}
+
+function dedupeChunkMapGroups(
+  groups: Array<{ entries: Array<[string, string]>; inferredExtension: ".css" | ".js" }>,
+): Array<{ entries: Array<[string, string]>; inferredExtension: ".css" | ".js" }> {
+  const seen = new Set<string>();
+  const deduped: Array<{ entries: Array<[string, string]>; inferredExtension: ".css" | ".js" }> = [];
+
+  for (const group of groups) {
+    const key = `${group.inferredExtension}:${group.entries.length}:${group.entries.slice(0, 10).map(([id, hash]) => `${id}:${hash}`).join(",")}`;
+
+    if (seen.has(key)) {
+      continue;
+    }
+
+    seen.add(key);
+    deduped.push(group);
+  }
+
+  return deduped;
+}
+
+function extractSourceMapUrls(text: string, baseUrl: string): string[] {
+  const matches = new Set<string>();
+  const pattern = /\/\/# sourceMappingURL=([^\s]+)/g;
+
+  for (const match of text.matchAll(pattern)) {
+    if (!match[1]) {
+      continue;
+    }
+
+    try {
+      matches.add(new URL(match[1], baseUrl).toString());
+    } catch {
+      continue;
+    }
+  }
+
+  return [...matches];
+}
+
+function createDiscordAssetUrl(chunkId: string, hash: string, extension: ".css" | ".js"): string {
+  return `https://discord.com/assets/${chunkId}.${hash}${extension}`;
+}
+
+function runtimeChunkManifestUrlMatchesMap(
+  chunkMap: WebRuntimeChunkManifest["chunkMaps"][number],
+  url: string,
+): boolean {
+  try {
+    const pathname = new URL(url).pathname;
+    return pathname.endsWith(chunkMap.inferredExtension);
+  } catch {
+    return false;
+  }
 }
 
 function isDeclaredShellAssetUrl(url: URL): boolean {

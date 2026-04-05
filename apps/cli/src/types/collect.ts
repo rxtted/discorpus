@@ -46,8 +46,9 @@ export interface WebCapturedAsset {
   headers?: Record<string, unknown>;
   kind: string;
   path: string;
-  provenance?: "declared" | "runtime";
+  provenance?: "declared" | "runtime" | "runtime_map";
   resourceType?: string;
+  runtimeMapSources?: string[];
   sha256: string;
   size: number;
   status: number;
@@ -65,6 +66,7 @@ export interface WebCaptureManifest {
   excludedAssets: WebExcludedAsset[];
   missedAssets: WebMissedAsset[];
   missedWebpackAssets: WebMissedAsset[];
+  runtimeChunkManifest: WebRuntimeChunkManifest;
   runtimeDiscovery: WebRuntimeDiscovery | null;
 }
 
@@ -75,6 +77,16 @@ export interface WebBootstrapChunkManifest {
   prefetchStyles: string[];
   scriptUrls: string[];
   stylesheetUrls: string[];
+}
+
+export interface WebRuntimeChunkManifest {
+  chunkMaps: Array<{
+    inferredExtension: ".css" | ".js";
+    sampleEntries: Array<{ chunkId: string; hash: string }>;
+    sourcePath: string;
+  }>;
+  derivedUrls: string[];
+  sourceMapUrls: string[];
 }
 
 export interface WebExcludedAsset {
@@ -111,6 +123,7 @@ export interface WebRuntimeSummary {
   promotedAssetCount: number;
   promotedKinds: Record<string, number>;
   resourceTypes: Record<string, number>;
+  runtimeMapAssetCount: number;
   sameOriginResourceCount: number;
   sameOriginWithBodyCount: number;
 }

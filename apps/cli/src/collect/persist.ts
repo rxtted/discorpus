@@ -46,6 +46,7 @@ export async function persistWebSnapshot(
   await writeJsonFile(path.join(paths.webDir, "excluded-assets.json"), manifest.excludedAssets);
   await writeJsonFile(path.join(paths.webDir, "missed-assets.json"), manifest.missedAssets);
   await writeJsonFile(path.join(paths.webDir, "missed-webpack-assets.json"), manifest.missedWebpackAssets);
+  await writeJsonFile(path.join(paths.webDir, "runtime-chunk-manifest.json"), manifest.runtimeChunkManifest);
   await writeJsonFile(path.join(paths.webDir, "manifest.json"), {
     assetUrls: manifest.assetUrls,
     buildNumber: manifest.buildNumber,
@@ -111,6 +112,7 @@ function serializeWebAsset(asset: WebCaptureManifest["assets"][number]): object 
     path: asset.path,
     provenance: asset.provenance ?? "runtime",
     resourceType: asset.resourceType ?? null,
+    runtimeMapSources: asset.runtimeMapSources ?? [],
     sha256: asset.sha256,
     size: asset.size,
     status: asset.status,
