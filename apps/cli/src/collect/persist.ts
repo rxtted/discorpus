@@ -40,6 +40,7 @@ export async function persistWebSnapshot(
   const paths = await createSnapshotPaths(baseDir, snapshot.id);
 
   await writeSnapshotFiles(paths.rootDir, records, snapshot);
+  await writeJsonFile(path.join(paths.webDir, "bootstrap-chunk-manifest.json"), manifest.bootstrapChunkManifest);
   await writeJsonFile(path.join(paths.webDir, "document.json"), serializeWebDocument(manifest.document));
   await writeJsonFile(path.join(paths.webDir, "assets.json"), manifest.assets.map(serializeWebAsset));
   await writeJsonFile(path.join(paths.webDir, "excluded-assets.json"), manifest.excludedAssets);
@@ -103,10 +104,12 @@ function serializeWebDocument(document: WebCaptureManifest["document"]): object 
 function serializeWebAsset(asset: WebCaptureManifest["assets"][number]): object {
   return {
     contentType: asset.contentType,
+    declarationKinds: asset.declarationKinds ?? [],
     finalUrl: asset.finalUrl,
     headers: asset.headers ?? null,
     kind: asset.kind,
     path: asset.path,
+    provenance: asset.provenance ?? "runtime",
     resourceType: asset.resourceType ?? null,
     sha256: asset.sha256,
     size: asset.size,

@@ -15,6 +15,7 @@ import type { DiskBlobStore, InMemorySnapshotStore } from "@discorpus/storage";
 
 import type {
   CliArtifactRecord,
+  WebBootstrapChunkManifest,
   WebCaptureManifest,
   WebCapturedAsset,
   WebCapturedDocument,
@@ -93,19 +94,22 @@ export async function collectDiscordWebManifest(channel: ReleaseChannel): Promis
   }
 
   const html = decodeUtf8Body(document.body);
+  const bootstrapChunkManifest = parseBootstrapChunkManifest(html);
   const { assets: runtimeAssets, excludedAssets, missedAssets, missedWebpackAssets } = await collectRuntimeAssets(capturedResources, document);
+  const assets = await mergeDeclaredShellAssets(runtimeAssets, bootstrapChunkManifest, document.finalUrl);
   runtimeDiscovery.summary = summarizeRuntimeCapture(
     capturedResources,
     document,
     excludedAssets,
-    runtimeAssets,
+    assets,
     missedAssets,
     missedWebpackAssets,
   );
 
   return {
-    assetUrls: runtimeAssets.map((asset) => asset.finalUrl),
-    assets: runtimeAssets,
+    assetUrls: assets.map((asset) => asset.finalUrl),
+    assets,
+    bootstrapChunkManifest,
     buildNumber: extractWebBuildNumber(html),
     channel,
     document,
@@ -489,10 +493,12 @@ async function collectRuntimeAssets(
     const asset: WebCapturedAsset = {
       body,
       contentType: resource.contentType,
+      declarationKinds: [],
       finalUrl: resource.finalUrl,
       headers: resource.headers,
       kind,
       path,
+      provenance: "runtime",
       resourceType: resource.resourceType,
       sha256: hashBuffer(body),
       size: body.length,
@@ -554,6 +560,7 @@ function summarizeRuntimeCapture(
   const bodyStates: Record<string, number> = {};
   const resourceTypes: Record<string, number> = {};
   let capturedWithBodyCount = 0;
+  let declaredAssetCount = 0;
   let promotableResourceCount = 0;
   let sameOriginResourceCount = 0;
   let sameOriginWithBodyCount = 0;
@@ -586,10 +593,17 @@ function summarizeRuntimeCapture(
     }
   }
 
+  for (const asset of promotedAssets) {
+    if (asset.provenance === "declared") {
+      declaredAssetCount += 1;
+    }
+  }
+
   return {
     bodyStates: sortCountMap(bodyStates),
     capturedResourceCount: resources.length,
     capturedWithBodyCount,
+    declaredAssetCount,
     contentTypeFamilies: sortCountMap(contentTypeFamilies),
     excludedAssetCount: excludedAssets.length,
     missedAssetCount: missedAssets.length,
@@ -731,6 +745,165 @@ function extractWebBuildNumber(html: string): string | null {
   return null;
 }
 
+function parseBootstrapChunkManifest(html: string): WebBootstrapChunkManifest {
+  return {
+    dataRspackChunkIds: extractDataRspackChunkIds(html),
+    globalEnv: extractGlobalEnvFields(html),
+    prefetchScripts: extractPrefetchAssets(html, "script"),
+    prefetchStyles: extractPrefetchStyles(html),
+    scriptUrls: extractScriptUrls(html),
+    stylesheetUrls: extractStylesheetUrls(html),
+  };
+}
+
+function extractPrefetchStyles(html: string): string[] {
+  return extractPrefetchAssets(html, "style");
+}
+
+function extractPrefetchAssets(html: string, as: "script" | "style"): string[] {
+  const matches = new Set<string>();
+  const patterns = [
+    new RegExp(`<link[^>]+rel=["'][^"']*prefetch[^"']*["'][^>]+as=["']${as}["'][^>]+href=["']([^"']+)["']`, "gi"),
+    new RegExp(`<link[^>]+as=["']${as}["'][^>]+rel=["'][^"']*prefetch[^"']*["'][^>]+href=["']([^"']+)["']`, "gi"),
+  ];
+
+  for (const pattern of patterns) {
+    for (const match of html.matchAll(pattern)) {
+      if (match[1]) {
+        matches.add(match[1]);
+      }
+    }
+  }
+
+  return [...matches].sort();
+}
+
+function extractScriptUrls(html: string): string[] {
+  return extractTagUrls(html, /<script[^>]+src=["']([^"']+)["']/gi);
+}
+
+function extractStylesheetUrls(html: string): string[] {
+  return extractTagUrls(html, /<link[^>]+rel=["'][^"']*stylesheet[^"']*["'][^>]+href=["']([^"']+)["']/gi);
+}
+
+function extractTagUrls(html: string, pattern: RegExp): string[] {
+  const matches = new Set<string>();
+
+  for (const match of html.matchAll(pattern)) {
+    if (match[1]) {
+      matches.add(match[1]);
+    }
+  }
+
+  return [...matches].sort();
+}
+
+function extractDataRspackChunkIds(html: string): string[] {
+  const ids = new Set<string>();
+  const pattern = /data-rspack=["']discord_app:chunk-([^"']+)["']/gi;
+
+  for (const match of html.matchAll(pattern)) {
+    if (match[1]) {
+      ids.add(match[1]);
+    }
+  }
+
+  return [...ids].sort();
+}
+
+function extractGlobalEnvFields(html: string): Record<string, string | number | boolean | null> {
+  const scriptMatch = html.match(/window\.GLOBAL_ENV\s*=\s*(\{[\s\S]*?\})\s*;?/i);
+
+  if (!scriptMatch?.[1]) {
+    return {};
+  }
+
+  const objectLiteral = scriptMatch[1];
+  const fields = new Map<string, string | number | boolean | null>();
+  const allowedKeys = [
+    "API_ENDPOINT",
+    "API_VERSION",
+    "BUILD_NUMBER",
+    "CDN_HOST",
+    "MEDIA_PROXY_ENDPOINT",
+    "PROJECT_ENV",
+    "PUBLIC_PATH",
+    "RELEASE_CHANNEL",
+    "VERSION_HASH",
+  ];
+
+  for (const key of allowedKeys) {
+    const value = extractLooseObjectLiteralValue(objectLiteral, key);
+
+    if (value !== undefined) {
+      fields.set(key, value);
+    }
+  }
+
+  const buildId = extractLooseNestedObjectValue(objectLiteral, "SENTRY_TAGS", "buildId");
+
+  if (buildId !== undefined) {
+    fields.set("SENTRY_TAGS.buildId", buildId);
+  }
+
+  return Object.fromEntries([...fields.entries()].sort((left, right) => left[0].localeCompare(right[0])));
+}
+
+function extractLooseObjectLiteralValue(
+  objectLiteral: string,
+  key: string,
+): string | number | boolean | null | undefined {
+  const escapedKey = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = objectLiteral.match(new RegExp(`${escapedKey}\\s*:\\s*("([^"\\\\]|\\\\.)*"|'([^'\\\\]|\\\\.)*'|true|false|null|-?\\d+)`, "i"));
+
+  if (!match?.[1]) {
+    return undefined;
+  }
+
+  return parseLooseLiteralValue(match[1]);
+}
+
+function extractLooseNestedObjectValue(
+  objectLiteral: string,
+  parentKey: string,
+  childKey: string,
+): string | number | boolean | null | undefined {
+  const escapedParentKey = parentKey.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const parentMatch = objectLiteral.match(new RegExp(`${escapedParentKey}\\s*:\\s*\\{([\\s\\S]*?)\\}`, "i"));
+
+  if (!parentMatch?.[1]) {
+    return undefined;
+  }
+
+  return extractLooseObjectLiteralValue(parentMatch[1], childKey);
+}
+
+function parseLooseLiteralValue(value: string): string | number | boolean | null {
+  const trimmed = value.trim();
+
+  if (trimmed === "true") {
+    return true;
+  }
+
+  if (trimmed === "false") {
+    return false;
+  }
+
+  if (trimmed === "null") {
+    return null;
+  }
+
+  if (/^-?\d+$/.test(trimmed)) {
+    return Number(trimmed);
+  }
+
+  if ((trimmed.startsWith("\"") && trimmed.endsWith("\"")) || (trimmed.startsWith("'") && trimmed.endsWith("'"))) {
+    return trimmed.slice(1, -1).replace(/\\(["'\\\/bfnrt])/g, "$1");
+  }
+
+  return trimmed;
+}
+
 function getDiscordWebEntryUrl(channel: ReleaseChannel): string {
   switch (channel) {
     case "stable":
@@ -869,6 +1042,114 @@ function createTrustedDiscordOrigins(documentUrl: string): Set<string> {
   }
 
   return origins;
+}
+
+async function mergeDeclaredShellAssets(
+  runtimeAssets: WebCapturedAsset[],
+  bootstrapChunkManifest: WebBootstrapChunkManifest,
+  documentUrl: string,
+): Promise<WebCapturedAsset[]> {
+  const assetsByPath = new Map(runtimeAssets.map((asset) => [asset.path, asset]));
+  const declarationKindsByUrl = new Map<string, Set<string>>();
+  const declaredSources = [
+    { kind: "prefetch_style", urls: bootstrapChunkManifest.prefetchStyles },
+    { kind: "prefetch_script", urls: bootstrapChunkManifest.prefetchScripts },
+    { kind: "stylesheet", urls: bootstrapChunkManifest.stylesheetUrls },
+    { kind: "script", urls: bootstrapChunkManifest.scriptUrls },
+  ] as const;
+
+  for (const source of declaredSources) {
+    for (const value of source.urls) {
+      let resolvedUrl: URL;
+
+      try {
+        resolvedUrl = new URL(value, documentUrl);
+      } catch {
+        continue;
+      }
+
+      if (!isDeclaredShellAssetUrl(resolvedUrl)) {
+        continue;
+      }
+
+      const url = resolvedUrl.toString();
+      const kinds = declarationKindsByUrl.get(url) ?? new Set<string>();
+      kinds.add(source.kind);
+      declarationKindsByUrl.set(url, kinds);
+    }
+  }
+
+  for (const [url, declarationKindsSet] of declarationKindsByUrl.entries()) {
+    const path = createWebArtifactPath(url);
+    const declarationKinds = [...declarationKindsSet].sort();
+    const existing = assetsByPath.get(path);
+
+    if (existing) {
+      existing.declarationKinds = mergeDeclarationKinds(existing.declarationKinds, declarationKinds);
+      continue;
+    }
+
+    let body: Uint8Array;
+
+    try {
+      body = await fetchBuffer(url);
+    } catch {
+      continue;
+    }
+
+    if (body.length === 0) {
+      continue;
+    }
+
+    const kind = classifyWebArtifact(url, null, inferDeclaredResourceType(url));
+
+    if (kind === "web_unknown") {
+      continue;
+    }
+
+    assetsByPath.set(path, {
+      body,
+      contentType: null,
+      declarationKinds,
+      finalUrl: url,
+      kind,
+      path,
+      provenance: "declared",
+      resourceType: inferDeclaredResourceType(url),
+      sha256: hashBuffer(body),
+      size: body.length,
+      status: 200,
+      url,
+    });
+  }
+
+  return [...assetsByPath.values()].sort((left, right) => left.path.localeCompare(right.path));
+}
+
+function isDeclaredShellAssetUrl(url: URL): boolean {
+  return url.origin === "https://discord.com" && url.pathname.startsWith("/assets/");
+}
+
+function inferDeclaredResourceType(url: string): string {
+  const extension = path.posix.extname(new URL(url).pathname).toLowerCase();
+
+  if (extension === ".css") {
+    return "Stylesheet";
+  }
+
+  if (extension === ".js" || extension === ".mjs") {
+    return "Script";
+  }
+
+  if (extension === ".html") {
+    return "Document";
+  }
+
+  return "Other";
+}
+
+function mergeDeclarationKinds(current: string[] | undefined, next: string[]): string[] {
+  return [...new Set([...(current ?? []), ...next])].sort();
 }
 
 function isExcludedContentResource(resource: DevtoolsCapturedResource): boolean {

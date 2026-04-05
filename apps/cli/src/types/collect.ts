@@ -41,10 +41,12 @@ export interface WebCapturedDocument {
 export interface WebCapturedAsset {
   body?: Uint8Array;
   contentType: string | null;
+  declarationKinds?: string[];
   finalUrl: string;
   headers?: Record<string, unknown>;
   kind: string;
   path: string;
+  provenance?: "declared" | "runtime";
   resourceType?: string;
   sha256: string;
   size: number;
@@ -55,6 +57,7 @@ export interface WebCapturedAsset {
 export interface WebCaptureManifest {
   assetUrls: string[];
   assets: WebCapturedAsset[];
+  bootstrapChunkManifest: WebBootstrapChunkManifest;
   buildNumber: string | null;
   channel: ReleaseChannel;
   document: WebCapturedDocument;
@@ -63,6 +66,15 @@ export interface WebCaptureManifest {
   missedAssets: WebMissedAsset[];
   missedWebpackAssets: WebMissedAsset[];
   runtimeDiscovery: WebRuntimeDiscovery | null;
+}
+
+export interface WebBootstrapChunkManifest {
+  dataRspackChunkIds: string[];
+  globalEnv: Record<string, string | number | boolean | null>;
+  prefetchScripts: string[];
+  prefetchStyles: string[];
+  scriptUrls: string[];
+  stylesheetUrls: string[];
 }
 
 export interface WebExcludedAsset {
@@ -89,6 +101,7 @@ export interface WebRuntimeSummary {
   bodyStates: Record<string, number>;
   capturedResourceCount: number;
   capturedWithBodyCount: number;
+  declaredAssetCount: number;
   excludedAssetCount: number;
   missedAssetCount: number;
   missedWebpackAssetCount: number;

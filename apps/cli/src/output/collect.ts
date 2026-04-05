@@ -89,6 +89,7 @@ export function printWebManifest(records: CliArtifactRecord[], manifest: WebCapt
 
     if (manifest.runtimeDiscovery.summary) {
       console.log(`web runtime resources with body: ${manifest.runtimeDiscovery.summary.capturedWithBodyCount}`);
+      console.log(`web declared assets: ${manifest.runtimeDiscovery.summary.declaredAssetCount}`);
       console.log(`web runtime same-origin resources: ${manifest.runtimeDiscovery.summary.sameOriginResourceCount}`);
       console.log(`web runtime same-origin with body: ${manifest.runtimeDiscovery.summary.sameOriginWithBodyCount}`);
       console.log(`web runtime promotable resources: ${manifest.runtimeDiscovery.summary.promotableResourceCount}`);
