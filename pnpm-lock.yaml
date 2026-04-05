@@ -29,6 +29,9 @@ importers:
       '@discorpus/platform-windows':
         specifier: workspace:*
         version: link:../../packages/platform-windows
+      '@discorpus/runtime-cdp':
+        specifier: workspace:*
+        version: link:../../packages/runtime-cdp
       '@discorpus/storage':
         specifier: workspace:*
         version: link:../../packages/storage
@@ -57,6 +60,8 @@ importers:
       '@discorpus/core':
         specifier: workspace:*
         version: link:../core
+
+  packages/runtime-cdp: {}
 
   packages/storage:
     dependencies:

@@ -1,6 +1,7 @@
 import path from "node:path";
 
 import { ensureCorpusDatabase, indexSnapshot } from "@discorpus/db";
+import type { DevtoolsCapturedResource } from "@discorpus/runtime-cdp";
 import { createSnapshotPaths, writeJsonFile } from "@discorpus/storage";
 
 import type { CliArtifactRecord, CliSnapshotRecord, CliVersionSet, DesktopAsarExtraction, WebCaptureManifest } from "../types/collect.js";
@@ -39,15 +40,15 @@ export async function persistWebSnapshot(
   const paths = await createSnapshotPaths(baseDir, snapshot.id);
 
   await writeSnapshotFiles(paths.rootDir, records, snapshot);
-  await writeJsonFile(path.join(paths.webDir, "document.json"), manifest.document);
-  await writeJsonFile(path.join(paths.webDir, "assets.json"), manifest.assets);
+  await writeJsonFile(path.join(paths.webDir, "document.json"), serializeWebDocument(manifest.document));
+  await writeJsonFile(path.join(paths.webDir, "assets.json"), manifest.assets.map(serializeWebAsset));
   await writeJsonFile(path.join(paths.webDir, "manifest.json"), {
     assetUrls: manifest.assetUrls,
     buildNumber: manifest.buildNumber,
     channel: manifest.channel,
     entryUrl: manifest.entryUrl,
   });
-  await writeJsonFile(path.join(paths.webDir, "runtime-discovery.json"), manifest.runtimeDiscovery);
+  await writeJsonFile(path.join(paths.webDir, "runtime-discovery.json"), serializeRuntimeDiscovery(manifest.runtimeDiscovery));
   await writeJsonFile(path.join(paths.webDir, "version.json"), versionSet.decision);
 
   return paths.rootDir;
@@ -80,4 +81,67 @@ async function writeSnapshotFiles(
       blob: record.blob ?? null,
     })),
   );
+}
+
+function serializeWebDocument(document: WebCaptureManifest["document"]): object {
+  return {
+    contentType: document.contentType,
+    finalUrl: document.finalUrl,
+    headers: document.headers ?? null,
+    resourceType: document.resourceType ?? null,
+    sha256: document.sha256,
+    size: document.size,
+    status: document.status,
+    url: document.url,
+  };
+}
+
+function serializeWebAsset(asset: WebCaptureManifest["assets"][number]): object {
+  return {
+    contentType: asset.contentType,
+    finalUrl: asset.finalUrl,
+    headers: asset.headers ?? null,
+    kind: asset.kind,
+    path: asset.path,
+    resourceType: asset.resourceType ?? null,
+    sha256: asset.sha256,
+    size: asset.size,
+    status: asset.status,
+    url: asset.url,
+  };
+}
+
+function serializeRuntimeDiscovery(runtimeDiscovery: WebCaptureManifest["runtimeDiscovery"]): object | null {
+  if (!runtimeDiscovery) {
+    return null;
+  }
+
+  return {
+    capture: runtimeDiscovery.capture
+      ? {
+          finishedAt: runtimeDiscovery.capture.finishedAt,
+          quietPeriodMs: runtimeDiscovery.capture.quietPeriodMs,
+          resources: runtimeDiscovery.capture.resources.map((resource: DevtoolsCapturedResource) => ({
+            contentType: resource.contentType,
+            encodedDataLength: resource.encodedDataLength,
+            finalUrl: resource.finalUrl,
+            fromDiskCache: resource.fromDiskCache,
+            hasBody: resource.body !== null,
+            headers: resource.headers,
+            requestId: resource.requestId,
+            resourceType: resource.resourceType,
+            size: resource.body?.length ?? 0,
+            status: resource.status,
+            url: resource.url,
+          })),
+          startedAt: runtimeDiscovery.capture.startedAt,
+        }
+      : null,
+    devtoolsBaseUrl: runtimeDiscovery.devtoolsBaseUrl,
+    launchPlan: runtimeDiscovery.launchPlan,
+    selectedTarget: runtimeDiscovery.selectedTarget,
+    targetCount: runtimeDiscovery.targetCount,
+    targets: runtimeDiscovery.targets,
+    version: runtimeDiscovery.version,
+  };
 }
