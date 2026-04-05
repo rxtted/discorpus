@@ -17,6 +17,9 @@ importers:
 
   apps/cli:
     dependencies:
+      '@discorpus/asar':
+        specifier: workspace:*
+        version: link:../../packages/asar
       '@discorpus/core':
         specifier: workspace:*
         version: link:../../packages/core
@@ -35,6 +38,8 @@ importers:
       '@discorpus/versioning':
         specifier: workspace:*
         version: link:../../packages/versioning
+
+  packages/asar: {}
 
   packages/core: {}
 

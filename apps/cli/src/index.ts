@@ -1,5 +1,7 @@
+import { createHash } from "node:crypto";
 import path from "node:path";
 
+import { extractAsarArchive, type AsarArchiveSummary } from "@discorpus/asar";
 import { formatSnapshotKey, type CorpusLayer, type ReleaseChannel, type VersionSignal } from "@discorpus/core";
 import {
   ensureCorpusDatabase,
@@ -22,6 +24,23 @@ import { createDiscordSnapshotKey, discordPlatforms, isDiscordChannel } from "@d
 import { createVersionSet } from "@discorpus/versioning";
 
 type CollectLayer = Extract<CorpusLayer, "desktop" | "web">;
+
+interface DesktopAsarArchiveRecord extends AsarArchiveSummary {
+  extractedFileCount: number;
+  kind: string;
+  relativePath: string;
+  sourcePath: string;
+}
+
+interface DesktopAsarExtraction {
+  archives: DesktopAsarArchiveRecord[];
+  extractedFileCount: number;
+  unpackedFileCount: number;
+}
+
+interface DesktopAsarExtractionResult extends DesktopAsarExtraction {
+  records: ReturnType<InMemorySnapshotStore["createArtifactRecord"]>[];
+}
 
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
@@ -110,15 +129,24 @@ async function runCollect(layer: CollectLayer, channel: ReleaseChannel, json: bo
   const snapshotKey = createDiscordSnapshotKey(channel, discordPlatforms[0], layer);
   const snapshotStore = new InMemorySnapshotStore();
   const snapshot = snapshotStore.createSnapshotRecord(snapshotKey, observedAt);
+  const blobStore = new DiskBlobStore(path.join(process.cwd(), "data", "blobs"));
   let desktopInstall: WindowsDesktopInstall | null = null;
   let desktopManifest: WindowsDesktopManifest | null = null;
   let desktopArtifactRecords: ReturnType<InMemorySnapshotStore["createArtifactRecord"]>[] = [];
+  let desktopAsarExtraction: DesktopAsarExtractionResult | null = null;
   let signals: VersionSignal[];
 
   if (layer === "desktop") {
     desktopInstall = await requireDesktopInstall(channel);
     desktopManifest = await collectWindowsDesktopManifest(desktopInstall);
-    desktopArtifactRecords = await createDesktopArtifactRecords(snapshot.id, snapshotStore, desktopManifest);
+    const rawArtifactRecords = await createDesktopArtifactRecords(snapshot.id, snapshotStore, blobStore, desktopManifest);
+    desktopAsarExtraction = await createExtractedAsarArtifactRecords(
+      snapshot.id,
+      snapshotStore,
+      blobStore,
+      desktopManifest,
+    );
+    desktopArtifactRecords = [...rawArtifactRecords, ...desktopAsarExtraction.records];
     snapshot.release = {
       appVersion: desktopManifest.buildInfo?.version,
       releaseId: desktopManifest.buildInfo?.releaseChannel,
@@ -167,8 +195,14 @@ async function runCollect(layer: CollectLayer, channel: ReleaseChannel, json: bo
   console.log(`corpus version: ${formatCorpusSummary(versionSet.decision.corpusVersionId)}`);
   if (desktopInstall && desktopManifest) {
     printDesktopDiscovery(desktopInstall);
-    printDesktopManifest(desktopArtifactRecords, desktopManifest);
-    const snapshotDir = await persistDesktopSnapshot(snapshot, desktopManifest, desktopArtifactRecords, versionSet);
+    printDesktopManifest(desktopArtifactRecords, desktopManifest, desktopAsarExtraction);
+    const snapshotDir = await persistDesktopSnapshot(
+      snapshot,
+      desktopManifest,
+      desktopArtifactRecords,
+      versionSet,
+      desktopAsarExtraction,
+    );
     const dbPath = await persistSnapshotIndex(snapshot, desktopArtifactRecords, versionSet);
     console.log(`snapshot dir: ${snapshotDir}`);
     console.log(`sqlite db: ${dbPath}`);
@@ -492,6 +526,7 @@ function printDesktopDiscovery(install: WindowsDesktopInstall): void {
 function printDesktopManifest(
   records: ReturnType<InMemorySnapshotStore["createArtifactRecord"]>[],
   manifest: WindowsDesktopManifest,
+  extraction: DesktopAsarExtraction | null,
 ): void {
   const counts = countArtifactKinds(records);
   const importantArtifacts = records.filter((record) =>
@@ -512,6 +547,9 @@ function printDesktopManifest(
   const bootstrapModules = Object.keys(manifest.bootstrapManifest ?? {}).sort();
   console.log(`desktop bootstrap modules: ${bootstrapModules.join(", ") || "none"}`);
   console.log(`desktop module manifests: ${Object.keys(manifest.moduleManifests).sort().join(", ") || "none"}`);
+  console.log(`desktop extracted asar archives: ${extraction?.archives.length ?? 0}`);
+  console.log(`desktop extracted asar files: ${extraction?.extractedFileCount ?? 0}`);
+  console.log(`desktop unpacked asar files: ${extraction?.unpackedFileCount ?? 0}`);
 
   for (const artifact of importantArtifacts.slice(0, 12)) {
     console.log(`artifact ${artifact.kind}: ${artifact.path} ${artifact.sha256}`);
@@ -521,10 +559,9 @@ function printDesktopManifest(
 async function createDesktopArtifactRecords(
   snapshotId: string,
   snapshotStore: InMemorySnapshotStore,
+  blobStore: DiskBlobStore,
   manifest: WindowsDesktopManifest,
 ): Promise<ReturnType<InMemorySnapshotStore["createArtifactRecord"]>[]> {
-  const blobStore = new DiskBlobStore(path.join(process.cwd(), "data", "blobs"));
-
   return Promise.all(manifest.artifacts.map(async (artifact) => {
     const blob = await blobStore.persistFile(artifact.path, artifact.sha256, "raw");
 
@@ -540,11 +577,71 @@ async function createDesktopArtifactRecords(
   }));
 }
 
+async function createExtractedAsarArtifactRecords(
+  snapshotId: string,
+  snapshotStore: InMemorySnapshotStore,
+  blobStore: DiskBlobStore,
+  manifest: WindowsDesktopManifest,
+): Promise<DesktopAsarExtraction & {
+  records: ReturnType<InMemorySnapshotStore["createArtifactRecord"]>[];
+}> {
+  const archives: DesktopAsarArchiveRecord[] = [];
+  const records: ReturnType<InMemorySnapshotStore["createArtifactRecord"]>[] = [];
+  let extractedFileCount = 0;
+  let unpackedFileCount = 0;
+
+  for (const artifact of manifest.artifacts) {
+    if (artifact.kind !== "app_asar" && artifact.kind !== "module_asar") {
+      continue;
+    }
+
+    let archiveExtractedFileCount = 0;
+    const relativeArchivePath = toPosixPath(artifact.relativePath);
+    const archive = await extractAsarArchive(artifact.path, async (file) => {
+      if (file.unpacked || !file.buffer) {
+        return;
+      }
+
+      const sha256 = createHash("sha256").update(file.buffer).digest("hex");
+      const blob = await blobStore.persistBuffer(file.buffer, sha256, "derived");
+
+      records.push(snapshotStore.createArtifactRecord({
+        snapshotId,
+        kind: classifyExtractedAsarArtifact(file.path),
+        path: `asar/${relativeArchivePath}!/${file.path}`,
+        sha256,
+        size: file.size,
+        source: `${artifact.path}!/${file.path}`,
+        blob,
+      }));
+      archiveExtractedFileCount += 1;
+      extractedFileCount += 1;
+    });
+
+    unpackedFileCount += archive.unpackedFileCount;
+    archives.push({
+      ...archive,
+      extractedFileCount: archiveExtractedFileCount,
+      kind: artifact.kind,
+      relativePath: relativeArchivePath,
+      sourcePath: artifact.path,
+    });
+  }
+
+  return {
+    archives,
+    extractedFileCount,
+    records,
+    unpackedFileCount,
+  };
+}
+
 async function persistDesktopSnapshot(
   snapshot: ReturnType<InMemorySnapshotStore["createSnapshotRecord"]>,
   manifest: WindowsDesktopManifest,
   records: ReturnType<InMemorySnapshotStore["createArtifactRecord"]>[],
   versionSet: ReturnType<typeof createVersionSet>,
+  extraction: DesktopAsarExtraction | null,
 ): Promise<string> {
   const baseDir = path.join(process.cwd(), "data", "snapshots");
   const paths = await createSnapshotPaths(baseDir, snapshot.id);
@@ -563,6 +660,7 @@ async function persistDesktopSnapshot(
   await writeJsonFile(path.join(paths.desktopDir, "build-info.json"), manifest.buildInfo);
   await writeJsonFile(path.join(paths.desktopDir, "bootstrap-manifest.json"), manifest.bootstrapManifest);
   await writeJsonFile(path.join(paths.desktopDir, "module-manifests.json"), manifest.moduleManifests);
+  await writeJsonFile(path.join(paths.desktopDir, "asar-archives.json"), extraction?.archives ?? []);
   await writeJsonFile(path.join(paths.desktopDir, "install.json"), manifest.install);
   await writeJsonFile(path.join(paths.desktopDir, "version.json"), versionSet.decision);
 
@@ -736,6 +834,40 @@ function formatFindFilters(filters: { kind?: string; pathFragment?: string; sha2
   ];
 
   return parts.join("");
+}
+
+function classifyExtractedAsarArtifact(filePath: string): string {
+  const extension = path.posix.extname(filePath).toLowerCase();
+
+  switch (extension) {
+    case ".js":
+    case ".cjs":
+    case ".mjs":
+      return "asar_javascript";
+    case ".json":
+      return "asar_json";
+    case ".css":
+      return "asar_css";
+    case ".html":
+      return "asar_html";
+    case ".map":
+      return "asar_source_map";
+    case ".node":
+      return "asar_native_module";
+    case ".wasm":
+      return "asar_wasm";
+    case ".txt":
+    case ".md":
+    case ".yml":
+    case ".yaml":
+      return "asar_text";
+    default:
+      return "asar_file";
+  }
+}
+
+function toPosixPath(value: string): string {
+  return value.replace(/\\/g, "/");
 }
 
 void main().catch((error: unknown) => {

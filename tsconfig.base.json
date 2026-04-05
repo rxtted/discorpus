@@ -18,6 +18,7 @@
     "resolveJsonModule": true,
     "forceConsistentCasingInFileNames": true,
     "paths": {
+      "@discorpus/asar": ["./packages/asar/src/index.ts"],
       "@discorpus/core": ["./packages/core/src/index.ts"],
       "@discorpus/db": ["./packages/db/src/index.ts"],
       "@discorpus/platform-windows": ["./packages/platform-windows/src/index.ts"],

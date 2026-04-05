@@ -13,6 +13,7 @@
     "start": "node ./dist/index.js"
   },
   "dependencies": {
+    "@discorpus/asar": "workspace:*",
     "@discorpus/core": "workspace:*",
     "@discorpus/db": "workspace:*",
     "@discorpus/platform-windows": "workspace:*",

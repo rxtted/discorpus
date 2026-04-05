@@ -7,6 +7,7 @@ import { createArtifactId, createSnapshotId, type ArtifactRecord, type BlobLocat
 export interface BlobStore {
   createBlobPath(sha256: string): string;
   createBlobLocation(sha256: string, kind?: BlobLocation["kind"]): BlobLocation;
+  persistBuffer(buffer: Uint8Array, sha256: string, kind?: BlobLocation["kind"]): Promise<BlobLocation>;
   persistFile(filePath: string, sha256: string, kind?: BlobLocation["kind"]): Promise<BlobLocation>;
 }
 
@@ -46,6 +47,19 @@ export class DiskBlobStore implements BlobStore {
 
     if (!(await pathExists(blobPath))) {
       await copyFile(filePath, blobPath);
+    }
+
+    return blobLocation;
+  }
+
+  async persistBuffer(buffer: Uint8Array, sha256: string, kind: BlobLocation["kind"] = "derived"): Promise<BlobLocation> {
+    const blobPath = this.createBlobPath(sha256);
+    const blobLocation = this.createBlobLocation(sha256, kind);
+
+    await mkdir(path.dirname(blobPath), { recursive: true });
+
+    if (!(await pathExists(blobPath))) {
+      await writeFile(blobPath, buffer);
     }
 
     return blobLocation;
