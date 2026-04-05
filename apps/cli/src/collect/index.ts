@@ -93,12 +93,9 @@ export async function runCollect(layer: CollectLayer, channel: ReleaseChannel, j
   }
 
   printCollectHeader({
-    channel,
     corpusVersionId: collectResult.corpusVersionId,
-    layer,
     snapshotId: snapshot.id,
     snapshotKey: formatSnapshotKey(snapshotKey),
-    status: collectResult.status,
     upstreamSummary: collectResult.upstreamSummary,
   });
 
