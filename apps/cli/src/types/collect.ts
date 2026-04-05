@@ -1,4 +1,6 @@
 import type { AsarArchiveSummary } from "@discorpus/asar";
+import type { DevtoolsTargetInfo, DevtoolsVersionInfo } from "@discorpus/runtime-cdp";
+import type { WindowsDesktopLaunchPlan } from "@discorpus/platform-windows";
 import { InMemorySnapshotStore } from "@discorpus/storage";
 import type { ReleaseChannel } from "@discorpus/core";
 import type { createVersionSet } from "@discorpus/versioning";
@@ -51,4 +53,12 @@ export interface WebCaptureManifest {
   channel: ReleaseChannel;
   document: WebCapturedDocument;
   entryUrl: string;
+  runtimeDiscovery: WebRuntimeDiscovery | null;
+}
+
+export interface WebRuntimeDiscovery {
+  devtoolsBaseUrl: string;
+  launchPlan: WindowsDesktopLaunchPlan;
+  targets: DevtoolsTargetInfo[];
+  version: DevtoolsVersionInfo;
 }
