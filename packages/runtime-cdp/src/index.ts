@@ -51,6 +51,7 @@ export interface DevtoolsCapturedResource {
 }
 
 export interface CaptureDevtoolsNetworkOptions {
+  captureUntilClose?: boolean;
   overallTimeoutMs?: number;
   quietPeriodMs?: number;
   reloadOnAttach?: boolean;
@@ -178,6 +179,7 @@ export async function captureDevtoolsNetwork(
   options: CaptureDevtoolsNetworkOptions = {},
 ): Promise<DevtoolsNetworkCapture> {
   const connection = await createCdpConnection(webSocketDebuggerUrl);
+  const captureUntilClose = options.captureUntilClose === true;
   const quietPeriodMs = options.quietPeriodMs ?? 3000;
   const overallTimeoutMs = options.overallTimeoutMs ?? 15000;
   const resources = new Map<string, MutableCapturedResource>();
@@ -311,14 +313,18 @@ export async function captureDevtoolsNetwork(
       await connection.send("Page.reload", { ignoreCache: true });
     }
 
-    const startedAtMs = Date.now();
+    if (captureUntilClose) {
+      await connection.waitUntilClosed();
+    } else {
+      const startedAtMs = Date.now();
 
-    while (Date.now() - startedAtMs < overallTimeoutMs) {
-      if (Date.now() - lastActivityAt >= quietPeriodMs) {
-        break;
+      while (Date.now() - startedAtMs < overallTimeoutMs) {
+        if (Date.now() - lastActivityAt >= quietPeriodMs) {
+          break;
+        }
+
+        await sleep(200);
       }
-
-      await sleep(200);
     }
 
     if (pendingBodies.size > 0) {
@@ -379,6 +385,7 @@ interface CdpConnection {
   close(): Promise<void>;
   onEvent(handler: (method: string, params: Record<string, unknown>) => void): () => void;
   send<T>(method: string, params?: Record<string, unknown>): Promise<T>;
+  waitUntilClosed(): Promise<void>;
 }
 
 async function createCdpConnection(webSocketDebuggerUrl: string): Promise<CdpConnection> {
@@ -393,6 +400,10 @@ async function createCdpConnection(webSocketDebuggerUrl: string): Promise<CdpCon
   const eventHandlers = new Set<(method: string, params: Record<string, unknown>) => void>();
   let nextId = 1;
   let closed = false;
+  let resolveClosed: (() => void) | null = null;
+  const closedPromise = new Promise<void>((resolve) => {
+    resolveClosed = resolve;
+  });
 
   await new Promise<void>((resolve, reject) => {
     socket.addEventListener("open", () => resolve());
@@ -442,6 +453,8 @@ async function createCdpConnection(webSocketDebuggerUrl: string): Promise<CdpCon
 
   socket.addEventListener("close", () => {
     closed = true;
+    resolveClosed?.();
+    resolveClosed = null;
 
     for (const pendingCommand of pending.values()) {
       pendingCommand.reject(new Error("cdp websocket closed"));
@@ -480,6 +493,9 @@ async function createCdpConnection(webSocketDebuggerUrl: string): Promise<CdpCon
         });
         socket.send(JSON.stringify({ id, method, params }));
       });
+    },
+    waitUntilClosed(): Promise<void> {
+      return closedPromise;
     },
   };
 }
