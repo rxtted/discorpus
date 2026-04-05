@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { createHash } from "node:crypto";
+import os from "node:os";
 import path from "node:path";
 
 import { extractAsarArchive, type AsarArchiveSummary } from "@discorpus/asar";
@@ -14,6 +15,7 @@ import {
   getPreviousSnapshot,
   getSnapshotByIdOrDirName,
   indexSnapshot,
+  listSnapshots,
 } from "@discorpus/db";
 import {
   collectWindowsDesktopManifest,
@@ -21,7 +23,7 @@ import {
   type WindowsDesktopInstall,
   type WindowsDesktopManifest,
 } from "@discorpus/platform-windows";
-import { createSnapshotPaths, DiskBlobStore, InMemorySnapshotStore, writeJsonFile } from "@discorpus/storage";
+import { createSnapshotDirName, createSnapshotPaths, DiskBlobStore, InMemorySnapshotStore, writeJsonFile } from "@discorpus/storage";
 import { createDiscordSnapshotKey, discordPlatforms, isDiscordChannel } from "@discorpus/targets-discord";
 import { createVersionSet } from "@discorpus/versioning";
 
@@ -87,6 +89,12 @@ async function main(): Promise<void> {
     }
 
     await runInspectSnapshot(snapshotId, json);
+    return;
+  }
+
+  if (normalizedArgs[0] === "inspect" && normalizedArgs[1] === "snapshots") {
+    const layer = parseLayerFromOption(normalizedArgs.slice(2));
+    await runInspectSnapshots(layer, json);
     return;
   }
 
@@ -158,7 +166,8 @@ async function runCollect(layer: CollectLayer, channel: ReleaseChannel, json: bo
   const snapshotKey = createDiscordSnapshotKey(channel, discordPlatforms[0], layer);
   const snapshotStore = new InMemorySnapshotStore();
   const snapshot = snapshotStore.createSnapshotRecord(snapshotKey, observedAt);
-  const blobStore = new DiskBlobStore(path.join(process.cwd(), "data", "blobs"));
+  const dataDir = getCorpusDataDir();
+  const blobStore = new DiskBlobStore(path.join(dataDir, "blobs"));
   let desktopInstall: WindowsDesktopInstall | null = null;
   let desktopManifest: WindowsDesktopManifest | null = null;
   let desktopArtifactRecords: ReturnType<InMemorySnapshotStore["createArtifactRecord"]>[] = [];
@@ -231,16 +240,18 @@ async function runCollect(layer: CollectLayer, channel: ReleaseChannel, json: bo
       desktopArtifactRecords,
       versionSet,
       desktopAsarExtraction,
+      dataDir,
     );
-    const dbPath = await persistSnapshotIndex(snapshot, desktopArtifactRecords, versionSet);
+    const dbPath = await persistSnapshotIndex(snapshot, desktopArtifactRecords, versionSet, dataDir);
     console.log(`snapshot dir: ${snapshotDir}`);
     console.log(`sqlite db: ${dbPath}`);
+    console.log(`corpus dir: ${dataDir}`);
   }
   console.log(`status: ${collectResult.status}`);
 }
 
 async function runInspectLatest(layer: CollectLayer, channel: ReleaseChannel, json: boolean): Promise<void> {
-  const db = await ensureCorpusDatabase(path.join(process.cwd(), "data"));
+  const db = await ensureCorpusDatabase(getCorpusDataDir());
   const snapshot = getLatestSnapshot(db.databasePath, channel, layer);
 
   if (!snapshot) {
@@ -292,7 +303,7 @@ async function runInspectLatest(layer: CollectLayer, channel: ReleaseChannel, js
 }
 
 async function runInspectSnapshot(snapshotId: string, json: boolean): Promise<void> {
-  const db = await ensureCorpusDatabase(path.join(process.cwd(), "data"));
+  const db = await ensureCorpusDatabase(getCorpusDataDir());
   const snapshot = getSnapshotByIdOrDirName(db.databasePath, snapshotId);
 
   if (!snapshot) {
@@ -343,11 +354,63 @@ async function runInspectSnapshot(snapshotId: string, json: boolean): Promise<vo
   console.log(`artifact kinds: ${formatArtifactCountRows(counts)}`);
 }
 
+async function runInspectSnapshots(layer: CollectLayer | null, json: boolean): Promise<void> {
+  const dataDir = getCorpusDataDir();
+  const db = await ensureCorpusDatabase(dataDir);
+  const snapshots = listSnapshots(db.databasePath, layer ?? undefined);
+  const result = {
+    dbPath: db.databasePath,
+    layer: layer ?? null,
+    snapshots: snapshots.map((snapshot) => ({
+      appVersion: snapshot.app_version,
+      channel: snapshot.channel,
+      corpusVersionId: snapshot.corpus_version_id,
+      dirName: createSnapshotDirName(snapshot.id),
+      id: snapshot.id,
+      isNewCorpusVersion: snapshot.is_new_corpus_version === 1,
+      isNewUpstreamVersion: snapshot.is_new_upstream_version === 1,
+      layer: snapshot.layer,
+      observedAt: snapshot.observed_at,
+      platform: snapshot.platform,
+      releaseId: snapshot.release_id,
+      target: snapshot.target,
+    })),
+  };
+
+  if (json) {
+    console.log(JSON.stringify(result, null, 2));
+    return;
+  }
+
+  console.log("discorpus");
+  console.log(`command: inspect snapshots${layer ? ` --layer ${layer}` : ""}`);
+  console.log(`sqlite db: ${db.databasePath}`);
+  console.log(`snapshots: ${snapshots.length}`);
+
+  if (snapshots.length === 0) {
+    console.log("status: no snapshots indexed");
+    return;
+  }
+
+  let currentChannel: string | null = null;
+
+  for (const snapshot of snapshots) {
+    if (snapshot.channel !== currentChannel) {
+      currentChannel = snapshot.channel;
+      console.log(`${currentChannel}:`);
+    }
+
+    const dirName = formatSnapshotDirName(snapshot.id);
+    const version = [snapshot.release_id ?? snapshot.channel, snapshot.app_version ?? "unknown"].join(" ");
+    console.log(`${dirName} ${snapshot.layer} ${snapshot.observed_at} ${version}`);
+  }
+}
+
 async function runFindArtifact(
   filters: { kind?: string; pathFragment?: string; sha256?: string },
   json: boolean,
 ): Promise<void> {
-  const db = await ensureCorpusDatabase(path.join(process.cwd(), "data"));
+  const db = await ensureCorpusDatabase(getCorpusDataDir());
   const results = findArtifacts(db.databasePath, filters, 50);
 
   if (json) {
@@ -381,7 +444,7 @@ async function runFindArtifact(
 }
 
 async function runInspectList(snapshotId: string, json: boolean): Promise<void> {
-  const db = await ensureCorpusDatabase(path.join(process.cwd(), "data"));
+  const db = await ensureCorpusDatabase(getCorpusDataDir());
   const snapshot = getSnapshotByIdOrDirName(db.databasePath, snapshotId);
 
   if (!snapshot) {
@@ -421,7 +484,7 @@ async function runInspectList(snapshotId: string, json: boolean): Promise<void> 
 }
 
 async function runInspectArchive(snapshotId: string, archiveName: string, json: boolean): Promise<void> {
-  const db = await ensureCorpusDatabase(path.join(process.cwd(), "data"));
+  const db = await ensureCorpusDatabase(getCorpusDataDir());
   const snapshot = getSnapshotByIdOrDirName(db.databasePath, snapshotId);
 
   if (!snapshot) {
@@ -497,7 +560,7 @@ async function runInspectArchive(snapshotId: string, archiveName: string, json: 
 }
 
 async function runDiffLatest(layer: CollectLayer, channel: ReleaseChannel, json: boolean): Promise<void> {
-  const db = await ensureCorpusDatabase(path.join(process.cwd(), "data"));
+  const db = await ensureCorpusDatabase(getCorpusDataDir());
   const latest = getLatestSnapshot(db.databasePath, channel, layer);
 
   if (!latest) {
@@ -787,8 +850,9 @@ async function persistDesktopSnapshot(
   records: ReturnType<InMemorySnapshotStore["createArtifactRecord"]>[],
   versionSet: ReturnType<typeof createVersionSet>,
   extraction: DesktopAsarExtraction | null,
+  dataDir: string,
 ): Promise<string> {
-  const baseDir = path.join(process.cwd(), "data", "snapshots");
+  const baseDir = path.join(dataDir, "snapshots");
   const paths = await createSnapshotPaths(baseDir, snapshot.id);
 
   await writeJsonFile(path.join(paths.rootDir, "snapshot.json"), snapshot);
@@ -816,8 +880,8 @@ async function persistSnapshotIndex(
   snapshot: ReturnType<InMemorySnapshotStore["createSnapshotRecord"]>,
   records: ReturnType<InMemorySnapshotStore["createArtifactRecord"]>[],
   versionSet: ReturnType<typeof createVersionSet>,
+  dataDir: string,
 ): Promise<string> {
-  const dataDir = path.join(process.cwd(), "data");
   const db = await ensureCorpusDatabase(dataDir);
 
   indexSnapshot(db.databasePath, snapshot, versionSet, records);
@@ -1082,6 +1146,7 @@ function summarizeArchiveTopLevelEntries(
 function printUsage(): void {
   console.error("usage: discorpus collect <desktop|web> --channel <stable|ptb|canary>");
   console.error("usage: discorpus inspect latest --channel <stable|ptb|canary> --layer <desktop|web>");
+  console.error("usage: discorpus inspect snapshots [--layer <desktop|web>]");
   console.error("usage: discorpus inspect snapshot <snapshot-id>");
   console.error("usage: discorpus inspect list <snapshot-id>");
   console.error("usage: discorpus inspect archive <snapshot-id> --name <archive-name>");
@@ -1162,6 +1227,34 @@ function classifyExtractedAsarArtifact(filePath: string): string {
 
 function toPosixPath(value: string): string {
   return value.replace(/\\/g, "/");
+}
+
+function formatSnapshotDirName(snapshotId: string): string {
+  return createSnapshotDirName(snapshotId);
+}
+
+function getCorpusDataDir(env: NodeJS.ProcessEnv = process.env): string {
+  const override = env.DISCORPUS_DATA_DIR;
+
+  if (override) {
+    return path.resolve(override);
+  }
+
+  if (process.platform === "win32") {
+    const localAppData = env.LOCALAPPDATA;
+
+    if (localAppData) {
+      return path.join(localAppData, "discorpus");
+    }
+  }
+
+  const xdgStateHome = env.XDG_STATE_HOME;
+
+  if (xdgStateHome) {
+    return path.join(xdgStateHome, "discorpus");
+  }
+
+  return path.join(os.homedir(), ".discorpus");
 }
 
 void main().catch((error: unknown) => {

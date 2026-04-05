@@ -37,6 +37,8 @@ export interface ArtifactKindCountRow {
 
 export interface SnapshotLookupRow extends LatestSnapshotRow {}
 
+export interface SnapshotListRow extends LatestSnapshotRow {}
+
 export interface ArtifactSearchFilters {
   kind?: string;
   pathFragment?: string;
@@ -300,6 +302,70 @@ export function getSnapshotByIdOrDirName(
     }
 
     return null;
+  } finally {
+    database.close();
+  }
+}
+
+export function listSnapshots(
+  databasePath: string,
+  layer?: string,
+): SnapshotListRow[] {
+  const database = new DatabaseSync(databasePath);
+
+  try {
+    const rows = layer
+      ? database.prepare(`
+        select
+          id,
+          target,
+          channel,
+          platform,
+          layer,
+          observed_at,
+          app_version,
+          release_id,
+          upstream_version_id,
+          corpus_version_id,
+          is_new_upstream_version,
+          is_new_corpus_version
+        from snapshots
+        where layer = ?
+        order by
+          case channel
+            when 'stable' then 1
+            when 'ptb' then 2
+            when 'canary' then 3
+            else 4
+          end asc,
+          observed_at desc
+      `).all(layer)
+      : database.prepare(`
+        select
+          id,
+          target,
+          channel,
+          platform,
+          layer,
+          observed_at,
+          app_version,
+          release_id,
+          upstream_version_id,
+          corpus_version_id,
+          is_new_upstream_version,
+          is_new_corpus_version
+        from snapshots
+        order by
+          case channel
+            when 'stable' then 1
+            when 'ptb' then 2
+            when 'canary' then 3
+            else 4
+          end asc,
+          observed_at desc
+      `).all();
+
+    return (rows as unknown) as SnapshotListRow[];
   } finally {
     database.close();
   }
