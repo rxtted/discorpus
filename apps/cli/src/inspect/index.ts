@@ -77,8 +77,7 @@ export async function runFindArtifact(
   }
 
   if (results.length === 0) {
-    console.error("no artifacts found");
-    process.exitCode = 1;
+    printArtifactSearchResults(results, db.databasePath);
     return;
   }
 
