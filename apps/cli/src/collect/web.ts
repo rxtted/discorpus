@@ -812,13 +812,11 @@ function extractDataRspackChunkIds(html: string): string[] {
 }
 
 function extractGlobalEnvFields(html: string): Record<string, string | number | boolean | null> {
-  const scriptMatch = html.match(/window\.GLOBAL_ENV\s*=\s*(\{[\s\S]*?\})\s*;?/i);
+  const objectLiteral = extractAssignedObjectLiteral(html, "window.GLOBAL_ENV");
 
-  if (!scriptMatch?.[1]) {
+  if (!objectLiteral) {
     return {};
   }
-
-  const objectLiteral = scriptMatch[1];
   const fields = new Map<string, string | number | boolean | null>();
   const allowedKeys = [
     "API_ENDPOINT",
@@ -847,6 +845,72 @@ function extractGlobalEnvFields(html: string): Record<string, string | number | 
   }
 
   return Object.fromEntries([...fields.entries()].sort((left, right) => left[0].localeCompare(right[0])));
+}
+
+function extractAssignedObjectLiteral(source: string, assignment: string): string | null {
+  const assignmentIndex = source.indexOf(assignment);
+
+  if (assignmentIndex === -1) {
+    return null;
+  }
+
+  const equalsIndex = source.indexOf("=", assignmentIndex + assignment.length);
+
+  if (equalsIndex === -1) {
+    return null;
+  }
+
+  const objectStart = source.indexOf("{", equalsIndex + 1);
+
+  if (objectStart === -1) {
+    return null;
+  }
+
+  let depth = 0;
+  let inString: '"' | "'" | null = null;
+  let escaped = false;
+
+  for (let index = objectStart; index < source.length; index += 1) {
+    const char = source[index];
+
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+
+      if (char === "\\") {
+        escaped = true;
+        continue;
+      }
+
+      if (char === inString) {
+        inString = null;
+      }
+
+      continue;
+    }
+
+    if (char === "\"" || char === "'") {
+      inString = char;
+      continue;
+    }
+
+    if (char === "{") {
+      depth += 1;
+      continue;
+    }
+
+    if (char === "}") {
+      depth -= 1;
+
+      if (depth === 0) {
+        return source.slice(objectStart, index + 1);
+      }
+    }
+  }
+
+  return null;
 }
 
 function extractLooseObjectLiteralValue(
