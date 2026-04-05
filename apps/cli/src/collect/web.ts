@@ -77,20 +77,24 @@ export async function collectDiscordWebManifest(channel: ReleaseChannel): Promis
   const runtimeDiscovery = await collectDiscordWebRuntimeDiscovery(channel);
   const capturedResources = runtimeDiscovery.capture?.resources ?? [];
   const runtimeDocument = selectRuntimeDocument(capturedResources, entryUrl);
+  const livePageDocument = runtimeDiscovery.capture?.pageDocument
+    ? createCapturedDocumentFromPage(runtimeDiscovery.capture.pageDocument)
+    : null;
+  const document = runtimeDocument ?? livePageDocument;
 
   if (!runtimeDiscovery.capture || capturedResources.length === 0) {
     throw new Error("live runtime capture produced no resources");
   }
 
-  if (!runtimeDocument) {
+  if (!document) {
     throw new Error(createMissingRuntimeDocumentError(runtimeDiscovery, capturedResources));
   }
 
-  const html = decodeUtf8Body(runtimeDocument.body);
-  const runtimeAssets = collectRuntimeAssets(capturedResources, runtimeDocument);
+  const html = decodeUtf8Body(document.body);
+  const runtimeAssets = collectRuntimeAssets(capturedResources, document);
   runtimeDiscovery.summary = summarizeRuntimeCapture(
     capturedResources,
-    runtimeDocument,
+    document,
     runtimeAssets,
   );
 
@@ -99,7 +103,7 @@ export async function collectDiscordWebManifest(channel: ReleaseChannel): Promis
     assets: runtimeAssets,
     buildNumber: extractWebBuildNumber(html),
     channel,
-    document: runtimeDocument,
+    document,
     entryUrl,
     runtimeDiscovery,
   };
@@ -206,6 +210,7 @@ async function collectRuntimeCaptureSession(
   const attachedTargetIds = new Set<string>();
   let captureFinishedAt = new Date().toISOString();
   let captureStartedAt: string | null = null;
+  let pageDocument: NonNullable<NonNullable<WebRuntimeDiscovery["capture"]>["pageDocument"]> | null = null;
   let selectedTarget: DevtoolsTargetInfo | null = null;
   let observedTarget = false;
   let devtoolsUnavailableSince: number | null = null;
@@ -263,6 +268,7 @@ async function collectRuntimeCaptureSession(
     }
 
     captureFinishedAt = capture.finishedAt;
+    pageDocument ??= capture.pageDocument;
 
     for (const resource of capture.resources) {
       resources.set(`${nextTarget.id}:${resource.requestId}`, {
@@ -276,6 +282,7 @@ async function collectRuntimeCaptureSession(
     capture: captureStartedAt
       ? {
           finishedAt: captureFinishedAt,
+          pageDocument,
           quietPeriodMs: 0,
           resources: [...resources.values()].sort((left, right) => left.finalUrl.localeCompare(right.finalUrl)),
           startedAt: captureStartedAt,
@@ -339,6 +346,21 @@ function selectRuntimeDocument(resources: DevtoolsCapturedResource[], entryUrl: 
     size: documentResource.body.length,
     status: documentResource.status,
     url: documentResource.url,
+  };
+}
+
+function createCapturedDocumentFromPage(pageDocument: NonNullable<NonNullable<WebRuntimeDiscovery["capture"]>["pageDocument"]>): WebCapturedDocument {
+  const body = new Uint8Array(Buffer.from(pageDocument.html, "utf8"));
+
+  return {
+    body,
+    contentType: pageDocument.contentType,
+    finalUrl: pageDocument.finalUrl,
+    resourceType: "Document",
+    sha256: hashBuffer(body),
+    size: body.length,
+    status: 200,
+    url: pageDocument.finalUrl,
   };
 }
 
