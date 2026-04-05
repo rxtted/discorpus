@@ -16,6 +16,7 @@
     "@discorpus/core": "workspace:*",
     "@discorpus/db": "workspace:*",
     "@discorpus/platform-windows": "workspace:*",
+    "@discorpus/runtime-cdp": "workspace:*",
     "@discorpus/storage": "workspace:*",
     "@discorpus/targets-discord": "workspace:*",
     "@discorpus/versioning": "workspace:*"
