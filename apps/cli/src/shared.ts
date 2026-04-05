@@ -2,7 +2,6 @@ import os from "node:os";
 import path from "node:path";
 
 import type { CorpusLayer, ReleaseChannel, VersionSignal } from "@discorpus/core";
-import { createSnapshotDirName } from "@discorpus/storage";
 import { isDiscordChannel } from "@discorpus/targets-discord";
 
 export type CollectLayer = Extract<CorpusLayer, "desktop" | "web">;
@@ -116,12 +115,18 @@ export function toPosixPath(value: string): string {
   return value.replace(/\\/g, "/");
 }
 
-export function formatSnapshotDirName(snapshotId: string): string {
-  return createSnapshotDirName(snapshotId);
-}
-
 export function formatCount(count: number, singular: string): string {
   return `${count} ${singular}${count === 1 ? "" : "s"}`;
+}
+
+export function countKinds<T extends { kind: string }>(items: T[]): Map<string, number> {
+  const counts = new Map<string, number>();
+
+  for (const item of items) {
+    counts.set(item.kind, (counts.get(item.kind) ?? 0) + 1);
+  }
+
+  return counts;
 }
 
 export function getCorpusDataDir(env: NodeJS.ProcessEnv = process.env): string {
