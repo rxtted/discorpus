@@ -32,6 +32,37 @@ export interface WaitForDevtoolsOptions {
   timeoutMs?: number;
 }
 
+export interface DevtoolsBodyResult {
+  base64Encoded: boolean;
+  body: Uint8Array;
+}
+
+export interface DevtoolsCapturedResource {
+  contentType: string | null;
+  encodedDataLength: number | null;
+  finalUrl: string;
+  fromDiskCache: boolean;
+  headers: Record<string, unknown>;
+  requestId: string;
+  resourceType: string;
+  status: number | null;
+  url: string;
+  body: Uint8Array | null;
+}
+
+export interface CaptureDevtoolsNetworkOptions {
+  overallTimeoutMs?: number;
+  quietPeriodMs?: number;
+  reloadOnAttach?: boolean;
+}
+
+export interface DevtoolsNetworkCapture {
+  finishedAt: string;
+  quietPeriodMs: number;
+  resources: DevtoolsCapturedResource[];
+  startedAt: string;
+}
+
 export async function getDevtoolsVersion(baseUrl: string): Promise<DevtoolsVersionInfo> {
   const payload = await fetchDevtoolsJson<{
     Browser?: string;
@@ -130,6 +161,182 @@ export function findDevtoolsTargets(
   });
 }
 
+export function pickPreferredDevtoolsTarget(targets: DevtoolsTargetInfo[]): DevtoolsTargetInfo | null {
+  const pageTargets = targets.filter((target) => target.type === "page");
+
+  if (pageTargets.length === 0) {
+    return null;
+  }
+
+  const discordAppTarget = pageTargets.find((target) => target.url.includes("discord.com"));
+
+  return discordAppTarget ?? pageTargets[0];
+}
+
+export async function captureDevtoolsNetwork(
+  webSocketDebuggerUrl: string,
+  options: CaptureDevtoolsNetworkOptions = {},
+): Promise<DevtoolsNetworkCapture> {
+  const connection = await createCdpConnection(webSocketDebuggerUrl);
+  const quietPeriodMs = options.quietPeriodMs ?? 3000;
+  const overallTimeoutMs = options.overallTimeoutMs ?? 15000;
+  const resources = new Map<string, MutableCapturedResource>();
+  const pendingBodies = new Set<Promise<void>>();
+  const startedAt = new Date().toISOString();
+  let lastActivityAt = Date.now();
+
+  const unsubscribe = connection.onEvent((method, params) => {
+    lastActivityAt = Date.now();
+
+    if (method === "Network.requestWillBeSent") {
+      const requestId = asString(params.requestId);
+
+      if (!requestId) {
+        return;
+      }
+
+      const existing = resources.get(requestId);
+      const request = asRecord(params.request);
+      const requestUrl = asString(request.url) ?? existing?.url ?? "";
+
+      resources.set(requestId, {
+        body: existing?.body ?? null,
+        contentType: existing?.contentType ?? null,
+        encodedDataLength: existing?.encodedDataLength ?? null,
+        finalUrl: requestUrl,
+        fromDiskCache: existing?.fromDiskCache ?? false,
+        headers: existing?.headers ?? {},
+        requestId,
+        resourceType: asString(params.type) ?? existing?.resourceType ?? "other",
+        status: existing?.status ?? null,
+        url: requestUrl,
+      });
+      return;
+    }
+
+    if (method === "Network.responseReceived") {
+      const requestId = asString(params.requestId);
+
+      if (!requestId) {
+        return;
+      }
+
+      const existing = resources.get(requestId);
+      const response = asRecord(params.response);
+      const responseUrl = asString(response.url) ?? existing?.finalUrl ?? existing?.url ?? "";
+
+      resources.set(requestId, {
+        body: existing?.body ?? null,
+        contentType: asString(response.mimeType) ?? null,
+        encodedDataLength: existing?.encodedDataLength ?? null,
+        finalUrl: responseUrl,
+        fromDiskCache: asBoolean(response.fromDiskCache),
+        headers: asHeaders(response.headers),
+        requestId,
+        resourceType: asString(params.type) ?? existing?.resourceType ?? "other",
+        status: asNumber(response.status),
+        url: existing?.url ?? responseUrl,
+      });
+      return;
+    }
+
+    if (method === "Network.loadingFinished") {
+      const requestId = asString(params.requestId);
+
+      if (!requestId) {
+        return;
+      }
+
+      const existing = resources.get(requestId);
+
+      if (!existing) {
+        return;
+      }
+
+      existing.encodedDataLength = asNumber(params.encodedDataLength);
+      resources.set(requestId, existing);
+
+      if (!shouldCaptureBody(existing)) {
+        return;
+      }
+
+      const pendingBody = connection
+        .send<{ base64Encoded?: boolean; body?: string }>("Network.getResponseBody", { requestId })
+        .then((result) => {
+          const resource = resources.get(requestId);
+
+          if (!resource || typeof result.body !== "string") {
+            return;
+          }
+
+          const body = decodeBody(result.body, result.base64Encoded === true);
+          resource.body = body;
+          resources.set(requestId, resource);
+        })
+        .catch(() => {
+          // some requests do not expose bodies through cdP; ignore and keep metadata
+        })
+        .finally(() => {
+          pendingBodies.delete(pendingBody);
+        });
+
+      pendingBodies.add(pendingBody);
+      return;
+    }
+
+    if (method === "Network.requestServedFromCache") {
+      const requestId = asString(params.requestId);
+
+      if (!requestId) {
+        return;
+      }
+
+      const existing = resources.get(requestId);
+
+      if (!existing) {
+        return;
+      }
+
+      existing.fromDiskCache = true;
+      resources.set(requestId, existing);
+    }
+  });
+
+  try {
+    await connection.send("Page.enable");
+    await connection.send("Network.enable");
+    await connection.send("Network.setCacheDisabled", { cacheDisabled: true });
+
+    if (options.reloadOnAttach !== false) {
+      await connection.send("Page.reload", { ignoreCache: true });
+    }
+
+    const startedAtMs = Date.now();
+
+    while (Date.now() - startedAtMs < overallTimeoutMs) {
+      if (Date.now() - lastActivityAt >= quietPeriodMs) {
+        break;
+      }
+
+      await sleep(200);
+    }
+
+    if (pendingBodies.size > 0) {
+      await Promise.allSettled([...pendingBodies]);
+    }
+  } finally {
+    unsubscribe();
+    await connection.close();
+  }
+
+  return {
+    finishedAt: new Date().toISOString(),
+    quietPeriodMs,
+    resources: [...resources.values()].sort((left, right) => left.finalUrl.localeCompare(right.finalUrl)),
+    startedAt,
+  };
+}
+
 function normalizeDevtoolsUrl(baseUrl: string, pathname: string): URL {
   let normalizedBase = baseUrl.trim();
 
@@ -164,4 +371,177 @@ async function sleep(ms: number): Promise<void> {
   await new Promise((resolve) => {
     setTimeout(resolve, ms);
   });
+}
+
+interface MutableCapturedResource extends DevtoolsCapturedResource {}
+
+interface CdpConnection {
+  close(): Promise<void>;
+  onEvent(handler: (method: string, params: Record<string, unknown>) => void): () => void;
+  send<T>(method: string, params?: Record<string, unknown>): Promise<T>;
+}
+
+async function createCdpConnection(webSocketDebuggerUrl: string): Promise<CdpConnection> {
+  const WebSocketCtor = (globalThis as { WebSocket?: new (url: string) => MinimalWebSocket }).WebSocket;
+
+  if (!WebSocketCtor) {
+    throw new Error("global WebSocket is not available in this Node runtime");
+  }
+
+  const socket = new WebSocketCtor(webSocketDebuggerUrl);
+  const pending = new Map<number, PendingCommand>();
+  const eventHandlers = new Set<(method: string, params: Record<string, unknown>) => void>();
+  let nextId = 1;
+  let closed = false;
+
+  await new Promise<void>((resolve, reject) => {
+    socket.addEventListener("open", () => resolve());
+    socket.addEventListener("error", (event: unknown) => reject(new Error(`cdp websocket failed to open: ${String(event)}`)));
+  });
+
+  socket.addEventListener("message", (event: unknown) => {
+    const messageEvent = asRecord(event);
+    const rawEventData = messageEvent.data;
+    const rawData = typeof rawEventData === "string"
+      ? rawEventData
+      : Buffer.from((rawEventData ?? new ArrayBuffer(0)) as ArrayBufferLike).toString("utf8");
+    const message = JSON.parse(rawData) as {
+      error?: { message?: string };
+      id?: number;
+      method?: string;
+      params?: Record<string, unknown>;
+      result?: unknown;
+    };
+
+    if (typeof message.id === "number") {
+      const pendingCommand = pending.get(message.id);
+
+      if (!pendingCommand) {
+        return;
+      }
+
+      pending.delete(message.id);
+
+      if (message.error) {
+        pendingCommand.reject(new Error(message.error.message ?? `cdp command failed: ${pendingCommand.method}`));
+        return;
+      }
+
+      pendingCommand.resolve(message.result);
+      return;
+    }
+
+    if (message.method) {
+      const params = asRecord(message.params);
+
+      for (const handler of eventHandlers) {
+        handler(message.method, params);
+      }
+    }
+  });
+
+  socket.addEventListener("close", () => {
+    closed = true;
+
+    for (const pendingCommand of pending.values()) {
+      pendingCommand.reject(new Error("cdp websocket closed"));
+    }
+
+    pending.clear();
+  });
+
+  return {
+    async close(): Promise<void> {
+      if (closed) {
+        return;
+      }
+
+      await new Promise<void>((resolve) => {
+        socket.addEventListener("close", () => resolve(), { once: true });
+        socket.close();
+      });
+    },
+    onEvent(handler: (method: string, params: Record<string, unknown>) => void): () => void {
+      eventHandlers.add(handler);
+
+      return () => {
+        eventHandlers.delete(handler);
+      };
+    },
+    send<T>(method: string, params?: Record<string, unknown>): Promise<T> {
+      const id = nextId;
+      nextId += 1;
+
+      return new Promise<T>((resolve, reject) => {
+        pending.set(id, {
+          method,
+          reject,
+          resolve: (value) => resolve(value as T),
+        });
+        socket.send(JSON.stringify({ id, method, params }));
+      });
+    },
+  };
+}
+
+interface PendingCommand {
+  method: string;
+  reject: (error: Error) => void;
+  resolve: (value: unknown) => void;
+}
+
+interface MinimalWebSocket {
+  addEventListener(
+    type: string,
+    listener: (event: unknown) => void,
+    options?: { once?: boolean },
+  ): void;
+  close(): void;
+  send(data: string): void;
+}
+
+function shouldCaptureBody(resource: MutableCapturedResource): boolean {
+  if (resource.status !== null && resource.status >= 400) {
+    return false;
+  }
+
+  if (resource.resourceType === "Document" || resource.resourceType === "Script" || resource.resourceType === "Stylesheet" || resource.resourceType === "XHR" || resource.resourceType === "Fetch") {
+    return true;
+  }
+
+  const contentType = resource.contentType?.toLowerCase() ?? "";
+
+  return contentType.includes("javascript") ||
+    contentType.includes("json") ||
+    contentType.includes("css") ||
+    contentType.includes("html") ||
+    contentType.includes("text");
+}
+
+function decodeBody(value: string, base64Encoded: boolean): Uint8Array {
+  if (base64Encoded) {
+    return Buffer.from(value, "base64");
+  }
+
+  return Buffer.from(value, "utf8");
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+}
+
+function asString(value: unknown): string | null {
+  return typeof value === "string" ? value : null;
+}
+
+function asNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function asBoolean(value: unknown): boolean {
+  return value === true;
+}
+
+function asHeaders(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" ? (value as Record<string, unknown>) : {};
 }
