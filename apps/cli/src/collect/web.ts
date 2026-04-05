@@ -268,7 +268,7 @@ async function collectRuntimeCaptureSession(
     }
 
     captureFinishedAt = capture.finishedAt;
-    pageDocument ??= capture.pageDocument;
+    pageDocument = pickPreferredPageDocument(pageDocument, capture.pageDocument, selectedTarget);
 
     for (const resource of capture.resources) {
       resources.set(`${nextTarget.id}:${resource.requestId}`, {
@@ -323,6 +323,49 @@ function pickNextRuntimeCaptureTarget(
   }
 
   return pickRuntimeCaptureTarget(unattachedTargets);
+}
+
+function pickPreferredPageDocument(
+  current: NonNullable<NonNullable<WebRuntimeDiscovery["capture"]>["pageDocument"]> | null,
+  candidate: NonNullable<NonNullable<WebRuntimeDiscovery["capture"]>["pageDocument"]> | null,
+  selectedTarget: DevtoolsTargetInfo | null,
+): NonNullable<NonNullable<WebRuntimeDiscovery["capture"]>["pageDocument"]> | null {
+  if (!candidate) {
+    return current;
+  }
+
+  if (!current) {
+    return candidate;
+  }
+
+  return scorePageDocument(candidate, selectedTarget) > scorePageDocument(current, selectedTarget)
+    ? candidate
+    : current;
+}
+
+function scorePageDocument(
+  pageDocument: NonNullable<NonNullable<WebRuntimeDiscovery["capture"]>["pageDocument"]>,
+  selectedTarget: DevtoolsTargetInfo | null,
+): number {
+  let score = 0;
+
+  if (isRemoteDiscordUrl(pageDocument.finalUrl)) {
+    score += 100;
+  }
+
+  if (selectedTarget && isSameOrigin(pageDocument.finalUrl, selectedTarget.url)) {
+    score += 25;
+  }
+
+  if (pageDocument.contentType?.toLowerCase().includes("html")) {
+    score += 10;
+  }
+
+  if (!pageDocument.finalUrl.startsWith("file:")) {
+    score += 5;
+  }
+
+  return score;
 }
 
 function selectRuntimeDocument(resources: DevtoolsCapturedResource[], entryUrl: string): WebCapturedDocument | null {
@@ -597,9 +640,7 @@ function pickRuntimeCaptureTarget(targets: DevtoolsTargetInfo[]): DevtoolsTarget
 }
 
 function isRemoteDiscordTarget(target: DevtoolsTargetInfo): boolean {
-  return target.url.startsWith("https://discord.com") ||
-    target.url.startsWith("https://ptb.discord.com") ||
-    target.url.startsWith("https://canary.discord.com");
+  return isRemoteDiscordUrl(target.url);
 }
 
 function hashBuffer(buffer: Uint8Array): string {
@@ -704,6 +745,20 @@ function getResourceOriginLabel(url: string): string {
     return new URL(url).origin;
   } catch {
     return "unknown";
+  }
+}
+
+function isRemoteDiscordUrl(url: string): boolean {
+  return url.startsWith("https://discord.com") ||
+    url.startsWith("https://ptb.discord.com") ||
+    url.startsWith("https://canary.discord.com");
+}
+
+function isSameOrigin(left: string, right: string): boolean {
+  try {
+    return new URL(left).origin === new URL(right).origin;
+  } catch {
+    return false;
   }
 }
 
