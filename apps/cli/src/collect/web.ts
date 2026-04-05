@@ -255,25 +255,33 @@ async function collectRuntimeCaptureSession(
   baseUrl: string,
   child: ChildProcess,
 ): Promise<Pick<WebRuntimeDiscovery, "capture" | "selectedTarget" | "targets">> {
-  const processExit = waitForProcessExit(child);
   const resources = new Map<string, DevtoolsCapturedResource>();
   const seenTargets = new Map<string, DevtoolsTargetInfo>();
   const attachedTargetIds = new Set<string>();
   let captureFinishedAt = new Date().toISOString();
   let captureStartedAt: string | null = null;
   let selectedTarget: DevtoolsTargetInfo | null = null;
+  let observedTarget = false;
+  let devtoolsUnavailableSince: number | null = null;
 
-  while (isChildRunning(child)) {
+  while (true) {
     let targets: DevtoolsTargetInfo[] = [];
 
     try {
       targets = await listDevtoolsTargets(baseUrl);
+      devtoolsUnavailableSince = null;
     } catch {
-      if (!isChildRunning(child)) {
+      if (observedTarget) {
+        devtoolsUnavailableSince ??= Date.now();
+
+        if (Date.now() - devtoolsUnavailableSince >= 5000) {
+          break;
+        }
+      } else if (!isChildRunning(child)) {
         break;
       }
 
-      await Promise.race([processExit, sleep(500)]);
+      await sleep(500);
       continue;
     }
 
@@ -284,10 +292,15 @@ async function collectRuntimeCaptureSession(
     const nextTarget = pickNextRuntimeCaptureTarget(targets, attachedTargetIds);
 
     if (!nextTarget?.webSocketDebuggerUrl) {
-      await Promise.race([processExit, sleep(500)]);
+      if (observedTarget && !isChildRunning(child) && targets.length === 0) {
+        break;
+      }
+
+      await sleep(500);
       continue;
     }
 
+    observedTarget = true;
     attachedTargetIds.add(nextTarget.id);
 
     if (!selectedTarget || isRemoteDiscordTarget(nextTarget)) {
