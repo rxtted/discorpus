@@ -1,7 +1,14 @@
 import path from "node:path";
 
 import { formatSnapshotKey, type CorpusLayer, type ReleaseChannel, type VersionSignal } from "@discorpus/core";
-import { ensureCorpusDatabase, getArtifactKindCounts, getLatestSnapshot, getSnapshotByIdOrDirName, indexSnapshot } from "@discorpus/db";
+import {
+  ensureCorpusDatabase,
+  findArtifacts,
+  getArtifactKindCounts,
+  getLatestSnapshot,
+  getSnapshotByIdOrDirName,
+  indexSnapshot,
+} from "@discorpus/db";
 import {
   collectWindowsDesktopManifest,
   discoverWindowsDesktopInstall,
@@ -57,6 +64,21 @@ async function main(): Promise<void> {
     }
 
     await runInspectSnapshot(snapshotId, json);
+    return;
+  }
+
+  if (normalizedArgs[0] === "find" && normalizedArgs[1] === "artifact") {
+    const sha256 = parseOption(normalizedArgs.slice(2), "--sha256");
+    const kind = parseOption(normalizedArgs.slice(2), "--kind");
+    const pathFragment = parseOption(normalizedArgs.slice(2), "--path");
+
+    if (!sha256 && !kind && !pathFragment) {
+      printUsage();
+      process.exitCode = 1;
+      return;
+    }
+
+    await runFindArtifact({ kind, pathFragment, sha256 }, json);
     return;
   }
 
@@ -240,6 +262,43 @@ async function runInspectSnapshot(snapshotId: string, json: boolean): Promise<vo
   console.log(`new corpus version: ${snapshot.is_new_corpus_version === 1 ? "true" : "false"}`);
   console.log(`sqlite db: ${db.databasePath}`);
   console.log(`artifact kinds: ${formatArtifactCountRows(counts)}`);
+}
+
+async function runFindArtifact(
+  filters: { kind?: string; pathFragment?: string; sha256?: string },
+  json: boolean,
+): Promise<void> {
+  const db = await ensureCorpusDatabase(path.join(process.cwd(), "data"));
+  const results = findArtifacts(db.databasePath, filters, 50);
+
+  if (json) {
+    console.log(JSON.stringify({
+      dbPath: db.databasePath,
+      filters,
+      results,
+    }, null, 2));
+    return;
+  }
+
+  if (results.length === 0) {
+    console.error("no artifacts found");
+    process.exitCode = 1;
+    return;
+  }
+
+  console.log("discorpus");
+  console.log(`command: find artifact${formatFindFilters(filters)}`);
+  console.log(`results: ${results.length}`);
+  console.log(`sqlite db: ${db.databasePath}`);
+
+  for (const result of results.slice(0, 20)) {
+    console.log(`${result.kind} ${result.path}`);
+    console.log(`snapshot: ${result.snapshot_id}`);
+    console.log(`scope: ${result.channel} ${result.platform} ${result.layer}`);
+    console.log(`observed at: ${result.observed_at}`);
+    console.log(`sha256: ${result.sha256}`);
+    console.log(`blob: ${result.blob_path ?? "none"}`);
+  }
 }
 
 function collectDesktopSignals(
@@ -478,10 +537,21 @@ function parseChannel(args: string[]): ReleaseChannel | null {
   return value;
 }
 
+function parseOption(args: string[], name: string): string | undefined {
+  const index = args.findIndex((value) => value === name);
+
+  if (index === -1) {
+    return undefined;
+  }
+
+  return args[index + 1];
+}
+
 function printUsage(): void {
   console.error("usage: discorpus collect <desktop|web> --channel <stable|ptb|canary>");
   console.error("usage: discorpus inspect latest --channel <stable|ptb|canary> --layer <desktop|web>");
   console.error("usage: discorpus inspect snapshot <snapshot-id>");
+  console.error("usage: discorpus find artifact [--sha256 <hash>] [--kind <kind>] [--path <path-fragment>]");
   console.error("optional: add --json for structured output");
 }
 
@@ -513,6 +583,16 @@ function toArtifactCountObject(counts: Map<string, number>): Record<string, numb
 
 function toArtifactCountObjectFromRows(rows: { count: number; kind: string }[]): Record<string, number> {
   return Object.fromEntries(rows.map((row) => [row.kind, row.count]));
+}
+
+function formatFindFilters(filters: { kind?: string; pathFragment?: string; sha256?: string }): string {
+  const parts = [
+    filters.sha256 ? ` --sha256 ${filters.sha256}` : "",
+    filters.kind ? ` --kind ${filters.kind}` : "",
+    filters.pathFragment ? ` --path ${filters.pathFragment}` : "",
+  ];
+
+  return parts.join("");
 }
 
 void main().catch((error: unknown) => {

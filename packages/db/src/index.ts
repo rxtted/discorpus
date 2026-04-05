@@ -37,6 +37,28 @@ export interface ArtifactKindCountRow {
 
 export interface SnapshotLookupRow extends LatestSnapshotRow {}
 
+export interface ArtifactSearchFilters {
+  kind?: string;
+  pathFragment?: string;
+  sha256?: string;
+}
+
+export interface ArtifactSearchRow {
+  blob_kind: string | null;
+  blob_path: string | null;
+  channel: string;
+  kind: string;
+  layer: string;
+  observed_at: string;
+  path: string;
+  platform: string;
+  sha256: string;
+  size: number;
+  snapshot_id: string;
+  source: string;
+  target: string;
+}
+
 export async function ensureCorpusDatabase(baseDir: string): Promise<DbPaths> {
   await mkdir(baseDir, { recursive: true });
 
@@ -202,6 +224,66 @@ export function getSnapshotByIdOrDirName(
     }
 
     return null;
+  } finally {
+    database.close();
+  }
+}
+
+export function findArtifacts(
+  databasePath: string,
+  filters: ArtifactSearchFilters,
+  limit = 50,
+): ArtifactSearchRow[] {
+  const database = new DatabaseSync(databasePath);
+
+  try {
+    const whereParts: string[] = [];
+    const values: Array<string | number> = [];
+
+    if (filters.sha256) {
+      whereParts.push("artifacts.sha256 = ?");
+      values.push(filters.sha256);
+    }
+
+    if (filters.kind) {
+      whereParts.push("artifacts.kind = ?");
+      values.push(filters.kind);
+    }
+
+    if (filters.pathFragment) {
+      whereParts.push("artifacts.path like ?");
+      values.push(`%${filters.pathFragment}%`);
+    }
+
+    if (whereParts.length === 0) {
+      return [];
+    }
+
+    values.push(limit);
+
+    const rows = database.prepare(`
+      select
+        artifacts.snapshot_id,
+        artifacts.kind,
+        artifacts.path,
+        artifacts.sha256,
+        artifacts.size,
+        artifacts.source,
+        artifacts.blob_kind,
+        artifacts.blob_path,
+        snapshots.target,
+        snapshots.channel,
+        snapshots.platform,
+        snapshots.layer,
+        snapshots.observed_at
+      from artifacts
+      inner join snapshots on snapshots.id = artifacts.snapshot_id
+      where ${whereParts.join(" and ")}
+      order by snapshots.observed_at desc, artifacts.path asc
+      limit ?
+    `).all(...values);
+
+    return (rows as unknown) as ArtifactSearchRow[];
   } finally {
     database.close();
   }
