@@ -81,7 +81,7 @@ export async function collectDiscordWebManifest(
   onProgress?: (message: string) => void,
 ): Promise<WebCaptureManifest> {
   const entryUrl = getDiscordWebEntryUrl(channel);
-  const runtimeDiscovery = await collectDiscordWebRuntimeDiscovery(channel);
+  const runtimeDiscovery = await collectDiscordWebRuntimeDiscovery(channel, onProgress);
   onProgress?.("web capture: session ended, deriving snapshot assets...");
   const capturedResources = runtimeDiscovery.capture?.resources ?? [];
   const runtimeDocument = selectRuntimeDocument(capturedResources, entryUrl);
@@ -183,7 +183,10 @@ async function fetchBuffer(url: string): Promise<Uint8Array> {
   return new Uint8Array(await response.arrayBuffer());
 }
 
-async function collectDiscordWebRuntimeDiscovery(channel: ReleaseChannel): Promise<WebRuntimeDiscovery> {
+async function collectDiscordWebRuntimeDiscovery(
+  channel: ReleaseChannel,
+  onProgress?: (message: string) => void,
+): Promise<WebRuntimeDiscovery> {
   const install = await discoverWindowsDesktopInstall(channel);
 
   if (!install) {
@@ -203,7 +206,7 @@ async function collectDiscordWebRuntimeDiscovery(channel: ReleaseChannel): Promi
 
   try {
     const version = await waitForDevtoolsVersion(devtoolsBaseUrl, { timeoutMs: 15000 });
-    const session = await collectRuntimeCaptureSession(devtoolsBaseUrl, child);
+    const session = await collectRuntimeCaptureSession(devtoolsBaseUrl, child, onProgress);
     completed = true;
 
     return {
@@ -226,6 +229,7 @@ async function collectDiscordWebRuntimeDiscovery(channel: ReleaseChannel): Promi
 async function collectRuntimeCaptureSession(
   baseUrl: string,
   child: ChildProcess,
+  onProgress?: (message: string) => void,
 ): Promise<Pick<WebRuntimeDiscovery, "capture" | "selectedTarget" | "targets">> {
   const resources = new Map<string, DevtoolsCapturedResource>();
   const seenTargets = new Map<string, DevtoolsTargetInfo>();
@@ -275,6 +279,7 @@ async function collectRuntimeCaptureSession(
 
     observedTarget = true;
     attachedTargetIds.add(nextTarget.id);
+    onProgress?.(`web capture: attached target ${nextTarget.type} ${nextTarget.url || nextTarget.id}`);
 
     if (!selectedTarget || isRemoteDiscordTarget(nextTarget)) {
       selectedTarget = nextTarget;
@@ -282,8 +287,14 @@ async function collectRuntimeCaptureSession(
 
     const capture = await captureDevtoolsNetwork(nextTarget.webSocketDebuggerUrl, {
       captureUntilClose: true,
+      onProgress: (progress) => {
+        onProgress?.(
+          `web capture: live resources=${progress.resourceCount} bodies=${progress.bodyCapturedCount} pending=${progress.bodyPendingCount} failed=${progress.bodyFailedCount} skipped=${progress.bodySkippedCount}`,
+        );
+      },
       reloadOnAttach: false,
     });
+    onProgress?.(`web capture: target closed ${nextTarget.url || nextTarget.id}, resources=${capture.resources.length}`);
 
     if (!captureStartedAt) {
       captureStartedAt = capture.startedAt;

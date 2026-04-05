@@ -54,9 +54,18 @@ export interface DevtoolsCapturedResource {
 
 export interface CaptureDevtoolsNetworkOptions {
   captureUntilClose?: boolean;
+  onProgress?: (progress: DevtoolsCaptureProgress) => void;
   overallTimeoutMs?: number;
   quietPeriodMs?: number;
   reloadOnAttach?: boolean;
+}
+
+export interface DevtoolsCaptureProgress {
+  bodyCapturedCount: number;
+  bodyFailedCount: number;
+  bodyPendingCount: number;
+  bodySkippedCount: number;
+  resourceCount: number;
 }
 
 export interface DevtoolsPageDocument {
@@ -195,7 +204,46 @@ export async function captureDevtoolsNetwork(
   const pendingBodies = new Set<Promise<void>>();
   const startedAt = new Date().toISOString();
   let lastActivityAt = Date.now();
+  let lastProgressAt = 0;
   let pageDocument: DevtoolsPageDocument | null = null;
+
+  const emitProgress = (force = false) => {
+    if (!options.onProgress) {
+      return;
+    }
+
+    const now = Date.now();
+
+    if (!force && now - lastProgressAt < 2000) {
+      return;
+    }
+
+    lastProgressAt = now;
+    let bodyCapturedCount = 0;
+    let bodyFailedCount = 0;
+    let bodyPendingCount = 0;
+    let bodySkippedCount = 0;
+
+    for (const resource of resources.values()) {
+      if (resource.bodyState === "captured") {
+        bodyCapturedCount += 1;
+      } else if (resource.bodyState === "failed") {
+        bodyFailedCount += 1;
+      } else if (resource.bodyState === "pending") {
+        bodyPendingCount += 1;
+      } else if (resource.bodyState === "skipped") {
+        bodySkippedCount += 1;
+      }
+    }
+
+    options.onProgress({
+      bodyCapturedCount,
+      bodyFailedCount,
+      bodyPendingCount,
+      bodySkippedCount,
+      resourceCount: resources.size,
+    });
+  };
 
   const unsubscribe = connection.onEvent((method, params) => {
     lastActivityAt = Date.now();
@@ -225,6 +273,7 @@ export async function captureDevtoolsNetwork(
         status: existing?.status ?? null,
         url: requestUrl,
       });
+      emitProgress();
       return;
     }
 
@@ -253,6 +302,7 @@ export async function captureDevtoolsNetwork(
         status: asNumber(response.status),
         url: existing?.url ?? responseUrl,
       });
+      emitProgress();
       return;
     }
 
@@ -275,11 +325,13 @@ export async function captureDevtoolsNetwork(
       if (!shouldCaptureBody(existing)) {
         existing.bodyState = "skipped";
         resources.set(requestId, existing);
+        emitProgress();
         return;
       }
 
       existing.bodyState = "pending";
       resources.set(requestId, existing);
+      emitProgress();
 
       const pendingBody = connection
         .send<{ base64Encoded?: boolean; body?: string }>("Network.getResponseBody", { requestId })
@@ -295,6 +347,7 @@ export async function captureDevtoolsNetwork(
           resource.bodyError = null;
           resource.bodyState = "captured";
           resources.set(requestId, resource);
+          emitProgress();
         })
         .catch((error: unknown) => {
           const resource = resources.get(requestId);
@@ -306,6 +359,7 @@ export async function captureDevtoolsNetwork(
           resource.bodyError = error instanceof Error ? error.message : String(error);
           resource.bodyState = "failed";
           resources.set(requestId, resource);
+          emitProgress();
         })
         .finally(() => {
           pendingBodies.delete(pendingBody);
@@ -330,6 +384,7 @@ export async function captureDevtoolsNetwork(
 
       existing.fromDiskCache = true;
       resources.set(requestId, existing);
+      emitProgress();
     }
   });
 
@@ -362,6 +417,7 @@ export async function captureDevtoolsNetwork(
     if (pendingBodies.size > 0) {
       await Promise.allSettled([...pendingBodies]);
     }
+    emitProgress(true);
   } finally {
     unsubscribe();
     await connection.close();
