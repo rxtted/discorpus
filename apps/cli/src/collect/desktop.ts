@@ -1,16 +1,16 @@
 import { createHash } from "node:crypto";
 import path from "node:path";
 
-import type { VersionSignal } from "@discorpus/core";
+import { extractAsarArchive } from "@discorpus/asar";
+import type { ReleaseChannel, VersionSignal } from "@discorpus/core";
 import type { WindowsDesktopInstall, WindowsDesktopManifest } from "@discorpus/platform-windows";
 import { discoverWindowsDesktopInstall } from "@discorpus/platform-windows";
 import { type DiskBlobStore, type InMemorySnapshotStore } from "@discorpus/storage";
 
 import type { CliArtifactRecord, DesktopAsarArchiveRecord, DesktopAsarExtractionResult } from "../types/collect.js";
 import { toPosixPath } from "../shared.js";
-import { extractAsarArchive } from "@discorpus/asar";
 
-export async function requireDesktopInstall(channel: import("@discorpus/core").ReleaseChannel): Promise<WindowsDesktopInstall> {
+export async function requireDesktopInstall(channel: ReleaseChannel): Promise<WindowsDesktopInstall> {
   const install = await discoverWindowsDesktopInstall(channel);
 
   if (!install) {
