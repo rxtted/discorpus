@@ -47,6 +47,7 @@ export async function persistWebSnapshot(
     channel: manifest.channel,
     entryUrl: manifest.entryUrl,
   });
+  await writeJsonFile(path.join(paths.webDir, "runtime-discovery.json"), manifest.runtimeDiscovery);
   await writeJsonFile(path.join(paths.webDir, "version.json"), versionSet.decision);
 
   return paths.rootDir;
