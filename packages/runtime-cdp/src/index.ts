@@ -27,6 +27,11 @@ export interface DevtoolsTargetQuery {
   urlIncludes?: string;
 }
 
+export interface WaitForDevtoolsOptions {
+  intervalMs?: number;
+  timeoutMs?: number;
+}
+
 export async function getDevtoolsVersion(baseUrl: string): Promise<DevtoolsVersionInfo> {
   const payload = await fetchDevtoolsJson<{
     Browser?: string;
@@ -79,6 +84,31 @@ export async function listDevtoolsTargets(baseUrl: string): Promise<DevtoolsTarg
     }));
 }
 
+export async function waitForDevtoolsVersion(
+  baseUrl: string,
+  options: WaitForDevtoolsOptions = {},
+): Promise<DevtoolsVersionInfo> {
+  const timeoutMs = options.timeoutMs ?? 15000;
+  const intervalMs = options.intervalMs ?? 250;
+  const startedAt = Date.now();
+  let lastError: unknown = null;
+
+  while (Date.now() - startedAt < timeoutMs) {
+    try {
+      return await getDevtoolsVersion(baseUrl);
+    } catch (error) {
+      lastError = error;
+      await sleep(intervalMs);
+    }
+  }
+
+  if (lastError instanceof Error) {
+    throw new Error(`timed out waiting for devtools endpoint: ${lastError.message}`);
+  }
+
+  throw new Error("timed out waiting for devtools endpoint");
+}
+
 export function findDevtoolsTargets(
   targets: DevtoolsTargetInfo[],
   query: DevtoolsTargetQuery,
@@ -128,4 +158,10 @@ async function fetchDevtoolsJson<T>(baseUrl: string, pathname: string): Promise<
   }
 
   return (await response.json()) as T;
+}
+
+async function sleep(ms: number): Promise<void> {
+  await new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
 }
