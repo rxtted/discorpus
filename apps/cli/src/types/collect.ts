@@ -59,13 +59,26 @@ export interface WebCaptureManifest {
   channel: ReleaseChannel;
   document: WebCapturedDocument;
   entryUrl: string;
+  missedAssets: WebMissedAsset[];
   runtimeDiscovery: WebRuntimeDiscovery | null;
+}
+
+export interface WebMissedAsset {
+  bodyError: string | null;
+  bodyState: string;
+  contentType: string | null;
+  finalUrl: string;
+  path: string;
+  reason: string;
+  resourceType: string;
+  status: number | null;
 }
 
 export interface WebRuntimeSummary {
   bodyStates: Record<string, number>;
   capturedResourceCount: number;
   capturedWithBodyCount: number;
+  missedAssetCount: number;
   contentTypeFamilies: Record<string, number>;
   origins: Record<string, number>;
   promotableResourceCount: number;

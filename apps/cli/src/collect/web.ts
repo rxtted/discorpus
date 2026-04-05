@@ -18,6 +18,7 @@ import type {
   WebCaptureManifest,
   WebCapturedAsset,
   WebCapturedDocument,
+  WebMissedAsset,
   WebRuntimeDiscovery,
   WebRuntimeSummary,
 } from "../types/collect.js";
@@ -91,11 +92,12 @@ export async function collectDiscordWebManifest(channel: ReleaseChannel): Promis
   }
 
   const html = decodeUtf8Body(document.body);
-  const runtimeAssets = collectRuntimeAssets(capturedResources, document);
+  const { assets: runtimeAssets, missedAssets } = await collectRuntimeAssets(capturedResources, document);
   runtimeDiscovery.summary = summarizeRuntimeCapture(
     capturedResources,
     document,
     runtimeAssets,
+    missedAssets,
   );
 
   return {
@@ -105,6 +107,7 @@ export async function collectDiscordWebManifest(channel: ReleaseChannel): Promis
     channel,
     document,
     entryUrl,
+    missedAssets,
     runtimeDiscovery,
   };
 }
@@ -407,34 +410,76 @@ function createCapturedDocumentFromPage(pageDocument: NonNullable<NonNullable<We
   };
 }
 
-function collectRuntimeAssets(resources: DevtoolsCapturedResource[], document: WebCapturedDocument): WebCapturedAsset[] {
-  const documentOrigin = new URL(document.finalUrl).origin;
+async function collectRuntimeAssets(
+  resources: DevtoolsCapturedResource[],
+  document: WebCapturedDocument,
+): Promise<{ assets: WebCapturedAsset[]; missedAssets: WebMissedAsset[] }> {
+  const trustedOrigins = createTrustedDiscordOrigins(document.finalUrl);
+  const assetsByPath = new Map<string, WebCapturedAsset>();
+  const missedAssets: WebMissedAsset[] = [];
 
-  return resources
-    .filter((resource) => isPromotableDiscordResource(resource, documentOrigin, document.finalUrl))
-    .map((resource) => ({
-      body: resource.body ?? undefined,
+  for (const resource of resources) {
+    if (!isPromotableDiscordResource(resource, trustedOrigins, document.finalUrl)) {
+      continue;
+    }
+
+    const recoveredBody = await recoverPromotableResourceBody(resource);
+    const body = recoveredBody ?? resource.body ?? undefined;
+    const kind = classifyWebArtifact(resource.finalUrl, resource.contentType, resource.resourceType);
+    const path = createWebArtifactPath(resource.finalUrl);
+
+    if (kind === "web_unknown") {
+      continue;
+    }
+
+    if (!body || body.length === 0) {
+      missedAssets.push({
+        bodyError: resource.bodyError,
+        bodyState: body ? "captured_empty" : resource.bodyState,
+        contentType: resource.contentType,
+        finalUrl: resource.finalUrl,
+        path,
+        reason: !body ? "no_body" : "empty_body",
+        resourceType: resource.resourceType,
+        status: resource.status,
+      });
+      continue;
+    }
+
+    const asset: WebCapturedAsset = {
+      body,
       contentType: resource.contentType,
       finalUrl: resource.finalUrl,
       headers: resource.headers,
-      kind: classifyWebArtifact(resource.finalUrl, resource.contentType, resource.resourceType),
-      path: createWebArtifactPath(resource.finalUrl),
+      kind,
+      path,
       resourceType: resource.resourceType,
-      sha256: hashBuffer(resource.body as Uint8Array),
-      size: (resource.body as Uint8Array).length,
+      sha256: hashBuffer(body),
+      size: body.length,
       status: resource.status as number,
       url: resource.url,
-    }))
-    .filter((asset) => asset.kind !== "web_unknown")
-    .sort((left, right) => left.path.localeCompare(right.path));
+    };
+
+    const existing = assetsByPath.get(path);
+
+    if (!existing || shouldReplacePromotedAsset(existing, asset)) {
+      assetsByPath.set(path, asset);
+    }
+  }
+
+  return {
+    assets: [...assetsByPath.values()].sort((left, right) => left.path.localeCompare(right.path)),
+    missedAssets: missedAssets.sort((left, right) => left.path.localeCompare(right.path)),
+  };
 }
 
 function summarizeRuntimeCapture(
   resources: DevtoolsCapturedResource[],
   document: WebCapturedDocument,
   promotedAssets: WebCapturedAsset[],
+  missedAssets: WebMissedAsset[],
 ): WebRuntimeSummary {
-  const documentOrigin = new URL(document.finalUrl).origin;
+  const trustedOrigins = createTrustedDiscordOrigins(document.finalUrl);
   const contentTypeFamilies: Record<string, number> = {};
   const origins: Record<string, number> = {};
   const bodyStates: Record<string, number> = {};
@@ -459,7 +504,7 @@ function summarizeRuntimeCapture(
       capturedWithBodyCount += 1;
     }
 
-    if (origin === documentOrigin) {
+    if (trustedOrigins.has(origin)) {
       sameOriginResourceCount += 1;
 
       if (resource.body) {
@@ -467,7 +512,7 @@ function summarizeRuntimeCapture(
       }
     }
 
-    if (isPromotableDiscordResource(resource, documentOrigin, document.finalUrl)) {
+    if (isPromotableDiscordResource(resource, trustedOrigins, document.finalUrl)) {
       promotableResourceCount += 1;
     }
   }
@@ -477,6 +522,7 @@ function summarizeRuntimeCapture(
     capturedResourceCount: resources.length,
     capturedWithBodyCount,
     contentTypeFamilies: sortCountMap(contentTypeFamilies),
+    missedAssetCount: missedAssets.length,
     origins: sortCountMap(origins),
     promotableResourceCount,
     promotedAssetCount: promotedAssets.length,
@@ -653,10 +699,10 @@ function sanitizePathComponent(value: string): string {
 
 function isPromotableDiscordResource(
   resource: DevtoolsCapturedResource,
-  documentOrigin: string,
+  trustedOrigins: Set<string>,
   documentUrl: string,
 ): boolean {
-  if (!resource.body || resource.status === null || resource.status < 200 || resource.status >= 400) {
+  if (resource.status === null || resource.status < 200 || resource.status >= 400) {
     return false;
   }
 
@@ -676,7 +722,7 @@ function isPromotableDiscordResource(
     return false;
   }
 
-  if (parsedUrl.origin !== documentOrigin) {
+  if (!trustedOrigins.has(parsedUrl.origin)) {
     return false;
   }
 
@@ -684,7 +730,19 @@ function isPromotableDiscordResource(
     return true;
   }
 
-  if (resource.resourceType === "Script" || resource.resourceType === "Stylesheet") {
+  if (
+    resource.resourceType === "Script" ||
+    resource.resourceType === "Stylesheet" ||
+    resource.resourceType === "Image" ||
+    resource.resourceType === "Font"
+  ) {
+    return true;
+  }
+
+  if ((resource.resourceType === "XHR" || resource.resourceType === "Fetch") && (
+    resource.contentType?.toLowerCase().includes("json") ||
+    path.posix.extname(parsedUrl.pathname).toLowerCase() === ".json"
+  )) {
     return true;
   }
 
@@ -693,6 +751,7 @@ function isPromotableDiscordResource(
   return extension === ".js" ||
     extension === ".mjs" ||
     extension === ".css" ||
+    extension === ".json" ||
     extension === ".map" ||
     extension === ".wasm" ||
     extension === ".woff" ||
@@ -714,6 +773,92 @@ function decodeUtf8Body(body: Uint8Array | undefined): string {
 
   return Buffer.from(body).toString("utf8");
 }
+
+function createTrustedDiscordOrigins(documentUrl: string): Set<string> {
+  const origins = new Set<string>([
+    "https://discord.com",
+    "https://cdn.discordapp.com",
+    "https://media.discordapp.net",
+  ]);
+
+  try {
+    origins.add(new URL(documentUrl).origin);
+  } catch {
+    // ignore invalid document url
+  }
+
+  return origins;
+}
+
+async function recoverPromotableResourceBody(resource: DevtoolsCapturedResource): Promise<Uint8Array | null> {
+  if (resource.body && resource.body.length > 0) {
+    return resource.body;
+  }
+
+  if (!shouldRecoverResourceByFetch(resource)) {
+    return null;
+  }
+
+  try {
+    const body = await fetchBuffer(resource.finalUrl);
+    return body.length > 0 ? body : null;
+  } catch {
+    return null;
+  }
+}
+
+function shouldRecoverResourceByFetch(resource: DevtoolsCapturedResource): boolean {
+  if (resource.status === null || resource.status < 200 || resource.status >= 400) {
+    return false;
+  }
+
+  try {
+    const parsedUrl = new URL(resource.finalUrl);
+    const extension = path.posix.extname(parsedUrl.pathname).toLowerCase();
+    const contentType = resource.contentType?.toLowerCase() ?? "";
+
+    return parsedUrl.pathname.startsWith("/assets/") || (
+      extension === ".js" ||
+      extension === ".mjs" ||
+      extension === ".css" ||
+      extension === ".json" ||
+      extension === ".map" ||
+      extension === ".wasm" ||
+      extension === ".woff" ||
+      extension === ".woff2" ||
+      extension === ".ttf" ||
+      extension === ".png" ||
+      extension === ".jpg" ||
+      extension === ".jpeg" ||
+      extension === ".gif" ||
+      extension === ".webp" ||
+      extension === ".svg" ||
+      extension === ".ico" ||
+      contentType.includes("javascript") ||
+      contentType.includes("css") ||
+      contentType.includes("json") ||
+      contentType.includes("wasm") ||
+      contentType.startsWith("font/") ||
+      contentType.startsWith("image/")
+    );
+  } catch {
+    return false;
+  }
+}
+
+function shouldReplacePromotedAsset(current: WebCapturedAsset, candidate: WebCapturedAsset): boolean {
+  if ((candidate.body?.length ?? 0) !== (current.body?.length ?? 0)) {
+    return (candidate.body?.length ?? 0) > (current.body?.length ?? 0);
+  }
+
+  if (candidate.sha256 !== current.sha256) {
+    return candidate.sha256 !== EMPTY_SHA256 && current.sha256 === EMPTY_SHA256;
+  }
+
+  return candidate.finalUrl.localeCompare(current.finalUrl) < 0;
+}
+
+const EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 
 function countAssetKinds(assets: WebCapturedAsset[]): Record<string, number> {
   const counts: Record<string, number> = {};

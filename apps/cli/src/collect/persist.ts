@@ -42,6 +42,7 @@ export async function persistWebSnapshot(
   await writeSnapshotFiles(paths.rootDir, records, snapshot);
   await writeJsonFile(path.join(paths.webDir, "document.json"), serializeWebDocument(manifest.document));
   await writeJsonFile(path.join(paths.webDir, "assets.json"), manifest.assets.map(serializeWebAsset));
+  await writeJsonFile(path.join(paths.webDir, "missed-assets.json"), manifest.missedAssets);
   await writeJsonFile(path.join(paths.webDir, "manifest.json"), {
     assetUrls: manifest.assetUrls,
     buildNumber: manifest.buildNumber,
