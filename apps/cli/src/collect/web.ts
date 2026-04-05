@@ -1,10 +1,14 @@
 import { createHash } from "node:crypto";
+import { mkdtemp, rm } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 
 import type { ReleaseChannel, VersionSignal } from "@discorpus/core";
+import { listDevtoolsTargets, waitForDevtoolsVersion } from "@discorpus/runtime-cdp";
+import { createWindowsDesktopLaunchPlan, discoverWindowsDesktopInstall, launchWindowsDesktopClient } from "@discorpus/platform-windows";
 import type { DiskBlobStore, InMemorySnapshotStore } from "@discorpus/storage";
 
-import type { CliArtifactRecord, WebCaptureManifest, WebCapturedAsset, WebCapturedDocument } from "../types/collect.js";
+import type { CliArtifactRecord, WebCaptureManifest, WebCapturedAsset, WebCapturedDocument, WebRuntimeDiscovery } from "../types/collect.js";
 
 const WEB_FETCH_HEADERS = { "user-agent": "discorpus/0.1.0" };
 
@@ -24,6 +28,24 @@ export function collectWebSignals(manifest: WebCaptureManifest): VersionSignal[]
     signals.push({ scope: "web", name: "asset_path", value: asset.path, confidence: "medium" });
   }
 
+  if (manifest.runtimeDiscovery) {
+    signals.push({
+      scope: "web",
+      name: "runtime_target_count",
+      value: String(manifest.runtimeDiscovery.targets.length),
+      confidence: "medium",
+    });
+
+    for (const target of manifest.runtimeDiscovery.targets) {
+      signals.push({
+        scope: "web",
+        name: "runtime_target",
+        value: `${target.type}:${target.title || target.url || target.id}`,
+        confidence: "medium",
+      });
+    }
+  }
+
   return signals;
 }
 
@@ -39,6 +61,7 @@ export function createWebNormalizedFingerprint(manifest: WebCaptureManifest): st
 }
 
 export async function collectDiscordWebManifest(channel: ReleaseChannel): Promise<WebCaptureManifest> {
+  const runtimeDiscovery = await collectDiscordWebRuntimeDiscovery(channel);
   const entryUrl = getDiscordWebEntryUrl(channel);
   const document = await fetchWebDocument(entryUrl);
   const html = (await fetchBuffer(document.finalUrl)).toString("utf8");
@@ -56,6 +79,7 @@ export async function collectDiscordWebManifest(channel: ReleaseChannel): Promis
     channel,
     document,
     entryUrl,
+    runtimeDiscovery,
   };
 }
 
@@ -143,6 +167,45 @@ async function fetchBuffer(url: string): Promise<Buffer> {
   }
 
   return Buffer.from(await response.arrayBuffer());
+}
+
+async function collectDiscordWebRuntimeDiscovery(channel: ReleaseChannel): Promise<WebRuntimeDiscovery> {
+  const install = await discoverWindowsDesktopInstall(channel);
+
+  if (!install) {
+    throw new Error(`desktop install not found for channel: ${channel}`);
+  }
+
+  const remoteDebuggingPort = 9222;
+  const tempUserDataDir = await mkdtemp(path.join(os.tmpdir(), "discorpus-runtime-"));
+  const launchPlan = createWindowsDesktopLaunchPlan(install, {
+    remoteDebuggingPort,
+    startMinimized: true,
+    useUpdater: false,
+    userDataDir: tempUserDataDir,
+  });
+  const child = launchWindowsDesktopClient(install, {
+    remoteDebuggingPort,
+    startMinimized: true,
+    useUpdater: false,
+    userDataDir: tempUserDataDir,
+  });
+  const devtoolsBaseUrl = `http://127.0.0.1:${remoteDebuggingPort}`;
+
+  try {
+    const version = await waitForDevtoolsVersion(devtoolsBaseUrl, { timeoutMs: 15000 });
+    const targets = await listDevtoolsTargets(devtoolsBaseUrl);
+
+    return {
+      devtoolsBaseUrl,
+      launchPlan,
+      targets,
+      version,
+    };
+  } finally {
+    child.kill();
+    await rm(tempUserDataDir, { force: true, recursive: true });
+  }
 }
 
 function classifyWebArtifact(url: string, contentType: string | null): string {
