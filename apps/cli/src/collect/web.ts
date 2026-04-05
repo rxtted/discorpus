@@ -214,6 +214,7 @@ async function collectDiscordWebRuntimeDiscovery(channel: ReleaseChannel): Promi
   const launchPlan = createWindowsDesktopLaunchPlan(install, launchOptions);
   const child = launchWindowsDesktopClient(install, launchOptions);
   const devtoolsBaseUrl = `http://127.0.0.1:${remoteDebuggingPort}`;
+  let completed = false;
 
   try {
     const version = await waitForDevtoolsVersion(devtoolsBaseUrl, { timeoutMs: 15000 });
@@ -221,11 +222,11 @@ async function collectDiscordWebRuntimeDiscovery(channel: ReleaseChannel): Promi
     const selectedTarget = pickRuntimeCaptureTarget(targets);
     const capture = selectedTarget?.webSocketDebuggerUrl
       ? await captureDevtoolsNetwork(selectedTarget.webSocketDebuggerUrl, {
-          overallTimeoutMs: 30000,
-          quietPeriodMs: 5000,
-          reloadOnAttach: true,
+          captureUntilClose: true,
+          reloadOnAttach: false,
         })
       : null;
+    completed = true;
 
     return {
       capture,
@@ -237,7 +238,9 @@ async function collectDiscordWebRuntimeDiscovery(channel: ReleaseChannel): Promi
       version,
     };
   } finally {
-    child.kill();
+    if (!completed) {
+      child.kill();
+    }
   }
 }
 
