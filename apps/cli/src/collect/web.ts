@@ -76,9 +76,13 @@ export function createWebNormalizedFingerprint(manifest: WebCaptureManifest): st
   return fingerprint.digest("hex");
 }
 
-export async function collectDiscordWebManifest(channel: ReleaseChannel): Promise<WebCaptureManifest> {
+export async function collectDiscordWebManifest(
+  channel: ReleaseChannel,
+  onProgress?: (message: string) => void,
+): Promise<WebCaptureManifest> {
   const entryUrl = getDiscordWebEntryUrl(channel);
   const runtimeDiscovery = await collectDiscordWebRuntimeDiscovery(channel);
+  onProgress?.("web capture: session ended, deriving snapshot assets...");
   const capturedResources = runtimeDiscovery.capture?.resources ?? [];
   const runtimeDocument = selectRuntimeDocument(capturedResources, entryUrl);
   const livePageDocument = runtimeDiscovery.capture?.pageDocument
@@ -97,8 +101,10 @@ export async function collectDiscordWebManifest(channel: ReleaseChannel): Promis
   const html = decodeUtf8Body(document.body);
   const bootstrapChunkManifest = parseBootstrapChunkManifest(html);
   const { assets: runtimeAssets, excludedAssets, missedAssets, missedWebpackAssets } = await collectRuntimeAssets(capturedResources, document);
+  onProgress?.("web capture: merging shell-declared assets...");
   const declaredAssets = await mergeDeclaredShellAssets(runtimeAssets, bootstrapChunkManifest, document.finalUrl);
   const runtimeChunkManifest = extractRuntimeChunkManifest(declaredAssets);
+  onProgress?.("web capture: deriving runtime-map assets...");
   const assets = await mergeRuntimeMapAssets(declaredAssets, runtimeChunkManifest, document.finalUrl);
   runtimeDiscovery.summary = summarizeRuntimeCapture(
     capturedResources,

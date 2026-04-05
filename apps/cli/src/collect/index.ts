@@ -58,7 +58,17 @@ export async function runCollect(layer: CollectLayer, channel: ReleaseChannel, j
     };
     signals = collectDesktopSignals(desktopInstall, desktopManifest);
   } else {
-    webManifest = await collectDiscordWebManifest(channel);
+    if (!json) {
+      console.log("web capture: waiting for discord session to end...");
+    }
+    webManifest = await collectDiscordWebManifest(channel, (message) => {
+      if (!json) {
+        console.log(message);
+      }
+    });
+    if (!json) {
+      console.log("web capture: persisting captured blobs...");
+    }
     webArtifactRecords = await createWebArtifactRecords(snapshot.id, snapshotStore, blobStore, webManifest);
     snapshot.release = {
       appVersion: webManifest.buildNumber ?? undefined,
