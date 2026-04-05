@@ -377,6 +377,11 @@ async function runDiffLatest(layer: CollectLayer, channel: ReleaseChannel, json:
   console.log(`removed: ${diff.removed.length}`);
   console.log(`changed: ${diff.changed.length}`);
 
+  if (diff.added.length === 0 && diff.removed.length === 0 && diff.changed.length === 0) {
+    console.log("status: no artifact changes detected");
+    return;
+  }
+
   for (const item of diff.added.slice(0, 10)) {
     console.log(`added ${item.kind} ${item.path}`);
   }
