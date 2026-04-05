@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { spawn, type ChildProcess } from "node:child_process";
 import { access, readdir, readFile, stat } from "node:fs/promises";
 import path from "node:path";
 
@@ -35,6 +36,22 @@ export interface WindowsDesktopManifest {
   bootstrapManifest: Record<string, number> | null;
   moduleManifests: Record<string, Record<string, unknown>>;
   artifacts: WindowsDesktopArtifact[];
+}
+
+export interface WindowsDesktopLaunchOptions {
+  extraArgs?: string[];
+  remoteDebuggingPort: number;
+  startMinimized?: boolean;
+  useUpdater?: boolean;
+  userDataDir?: string;
+}
+
+export interface WindowsDesktopLaunchPlan {
+  args: string[];
+  command: string;
+  cwd: string;
+  launchMethod: "direct" | "update_exe";
+  remoteDebuggingPort: number;
 }
 
 const channelDirs: Record<ReleaseChannel, string> = {
@@ -152,6 +169,59 @@ export async function collectWindowsDesktopManifest(
   };
 }
 
+export function createWindowsDesktopLaunchPlan(
+  install: WindowsDesktopInstall,
+  options: WindowsDesktopLaunchOptions,
+): WindowsDesktopLaunchPlan {
+  if (!install.executablePath) {
+    throw new Error("desktop executable path is not available");
+  }
+
+  if (!Number.isInteger(options.remoteDebuggingPort) || options.remoteDebuggingPort < 1 || options.remoteDebuggingPort > 65535) {
+    throw new Error(`invalid remote debugging port: ${options.remoteDebuggingPort}`);
+  }
+
+  const runtimeArgs = createRuntimeArgs(options);
+  const shouldUseUpdater = options.useUpdater !== false && Boolean(install.updateExePath);
+
+  if (shouldUseUpdater && install.updateExePath) {
+    return {
+      args: [
+        "--processStart",
+        path.basename(install.executablePath),
+        "--process-start-args",
+        joinWindowsProcessArgs(runtimeArgs),
+      ],
+      command: install.updateExePath,
+      cwd: install.rootDir,
+      launchMethod: "update_exe",
+      remoteDebuggingPort: options.remoteDebuggingPort,
+    };
+  }
+
+  return {
+    args: runtimeArgs,
+    command: install.executablePath,
+    cwd: install.currentAppDir ?? path.dirname(install.executablePath),
+    launchMethod: "direct",
+    remoteDebuggingPort: options.remoteDebuggingPort,
+  };
+}
+
+export function launchWindowsDesktopClient(
+  install: WindowsDesktopInstall,
+  options: WindowsDesktopLaunchOptions,
+): ChildProcess {
+  const plan = createWindowsDesktopLaunchPlan(install, options);
+
+  return spawn(plan.command, plan.args, {
+    cwd: plan.cwd,
+    detached: false,
+    stdio: "ignore",
+    windowsHide: true,
+  });
+}
+
 async function findAppDirs(rootDir: string): Promise<string[]> {
   const entries = await readdir(rootDir, { withFileTypes: true });
 
@@ -220,6 +290,24 @@ async function collectModuleManifests(
   return manifests;
 }
 
+function createRuntimeArgs(options: WindowsDesktopLaunchOptions): string[] {
+  const args = [`--remote-debugging-port=${options.remoteDebuggingPort}`];
+
+  if (options.userDataDir) {
+    args.push(`--user-data-dir=${options.userDataDir}`);
+  }
+
+  if (options.startMinimized) {
+    args.push("--start-minimized");
+  }
+
+  if (options.extraArgs?.length) {
+    args.push(...options.extraArgs);
+  }
+
+  return args;
+}
+
 function compareAppDirs(left: string, right: string): number {
   return compareVersions(getVersionFromAppDir(left), getVersionFromAppDir(right));
 }
@@ -248,6 +336,51 @@ function compareVersions(left: string, right: string): number {
 function toVersionNumber(value: string): number {
   const parsed = Number.parseInt(value, 10);
   return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function joinWindowsProcessArgs(args: string[]): string {
+  return args.map(quoteWindowsArg).join(" ");
+}
+
+function quoteWindowsArg(value: string): string {
+  if (value.length === 0) {
+    return "\"\"";
+  }
+
+  if (!/[\s"]/u.test(value)) {
+    return value;
+  }
+
+  let quoted = "\"";
+  let backslashCount = 0;
+
+  for (const character of value) {
+    if (character === "\\") {
+      backslashCount += 1;
+      continue;
+    }
+
+    if (character === "\"") {
+      quoted += "\\".repeat(backslashCount * 2 + 1);
+      quoted += "\"";
+      backslashCount = 0;
+      continue;
+    }
+
+    if (backslashCount > 0) {
+      quoted += "\\".repeat(backslashCount);
+      backslashCount = 0;
+    }
+
+    quoted += character;
+  }
+
+  if (backslashCount > 0) {
+    quoted += "\\".repeat(backslashCount * 2);
+  }
+
+  quoted += "\"";
+  return quoted;
 }
 
 async function pickExistingPath(value: string): Promise<string | null> {
