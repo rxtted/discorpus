@@ -6,12 +6,12 @@ import { DiskBlobStore, InMemorySnapshotStore } from "@discorpus/storage";
 import { createDiscordSnapshotKey, discordPlatforms } from "@discorpus/targets-discord";
 import { createVersionSet } from "@discorpus/versioning";
 
-import { collectDesktopSignals, createDesktopArtifactRecords, createExtractedAsarArtifactRecords, requireDesktopInstall } from "./collect-desktop.js";
-import { printCollectFooter, printCollectHeader, printDesktopDiscovery, printDesktopManifest, printWebManifest } from "./collect-output.js";
-import { persistDesktopSnapshot, persistSnapshotIndex, persistWebSnapshot } from "./collect-persist.js";
-import type { CliArtifactRecord, DesktopAsarExtractionResult, WebCaptureManifest } from "./collect-types.js";
-import { collectDiscordWebManifest, collectWebSignals, createWebArtifactRecords, createWebNormalizedFingerprint } from "./collect-web.js";
-import { type CollectLayer, countKinds, formatUpstreamSummary, getCorpusDataDir, toArtifactCountObject } from "./shared.js";
+import { collectDesktopSignals, createDesktopArtifactRecords, createExtractedAsarArtifactRecords, requireDesktopInstall } from "./desktop.js";
+import { persistDesktopSnapshot, persistSnapshotIndex, persistWebSnapshot } from "./persist.js";
+import type { CliArtifactRecord, DesktopAsarExtractionResult, WebCaptureManifest } from "../types/collect.js";
+import { collectDiscordWebManifest, collectWebSignals, createWebArtifactRecords, createWebNormalizedFingerprint } from "./web.js";
+import { printCollectFooter, printCollectHeader, printDesktopDiscovery, printDesktopManifest, printWebManifest } from "../output/collect.js";
+import { type CollectLayer, countKinds, formatUpstreamSummary, getCorpusDataDir, toArtifactCountObject } from "../shared.js";
 
 interface CollectResult {
   artifactKindCounts: Record<string, number>;

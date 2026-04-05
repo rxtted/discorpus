@@ -4,7 +4,7 @@ import path from "node:path";
 import type { ReleaseChannel, VersionSignal } from "@discorpus/core";
 import type { DiskBlobStore, InMemorySnapshotStore } from "@discorpus/storage";
 
-import type { CliArtifactRecord, WebCaptureManifest, WebCapturedAsset, WebCapturedDocument } from "./collect-types.js";
+import type { CliArtifactRecord, WebCaptureManifest, WebCapturedAsset, WebCapturedDocument } from "../types/collect.js";
 
 const WEB_FETCH_HEADERS = { "user-agent": "discorpus/0.1.0" };
 

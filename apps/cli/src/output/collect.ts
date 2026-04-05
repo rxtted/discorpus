@@ -1,7 +1,7 @@
 import type { WindowsDesktopInstall, WindowsDesktopManifest } from "@discorpus/platform-windows";
 
-import type { CliArtifactRecord, DesktopAsarExtraction, WebCaptureManifest } from "./collect-types.js";
-import { countKinds, formatArtifactCounts, formatCorpusSummary, formatUpstreamSummary } from "./shared.js";
+import type { CliArtifactRecord, DesktopAsarExtraction, WebCaptureManifest } from "../types/collect.js";
+import { countKinds, formatArtifactCounts, formatCorpusSummary } from "../shared.js";
 
 export interface CollectHeaderOptions {
   channel: string;

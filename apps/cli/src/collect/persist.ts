@@ -3,7 +3,7 @@ import path from "node:path";
 import { ensureCorpusDatabase, indexSnapshot } from "@discorpus/db";
 import { createSnapshotPaths, writeJsonFile } from "@discorpus/storage";
 
-import type { CliArtifactRecord, CliSnapshotRecord, CliVersionSet, DesktopAsarExtraction, WebCaptureManifest } from "./collect-types.js";
+import type { CliArtifactRecord, CliSnapshotRecord, CliVersionSet, DesktopAsarExtraction, WebCaptureManifest } from "../types/collect.js";
 import type { WindowsDesktopManifest } from "@discorpus/platform-windows";
 
 export async function persistDesktopSnapshot(

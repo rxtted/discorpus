@@ -2,8 +2,8 @@ import { createSnapshotDirName } from "@discorpus/storage";
 
 import type { ArtifactSearchRow } from "@discorpus/db";
 
-import type { ArchiveEntry, ArtifactDiff, InspectableEntry, SnapshotArtifact } from "./inspect-types.js";
-import { countKinds, formatArtifactCountRows, formatArtifactCounts, formatCorpusSummary, formatCount, formatUpstreamSummary } from "./shared.js";
+import type { ArchiveEntry, ArtifactDiff, InspectableEntry, SnapshotArtifact } from "../types/inspect.js";
+import { countKinds, formatArtifactCountRows, formatArtifactCounts, formatCorpusSummary, formatCount, formatUpstreamSummary } from "../shared.js";
 
 export function printSnapshotSummary(
   snapshot: {

@@ -1,9 +1,9 @@
 import { ensureCorpusDatabase, findArtifacts, getArtifactsBySnapshotId, getArtifactKindCounts, getLatestSnapshot, getPreviousSnapshot, getSnapshotByIdOrDirName, listSnapshots } from "@discorpus/db";
 import type { ReleaseChannel } from "@discorpus/core";
 
-import { createArchiveResult, createFindArtifactResult, createSnapshotListItem, createSnapshotSummaryResult, diffArtifacts, listSnapshotArchives, listSnapshotInspectableFiles, resolveSnapshotArchive } from "./inspect-helpers.js";
-import { printAmbiguousArchiveMatches, printArchiveDetails, printArtifactSearchResults, printDiffSummary, printNoPreviousDiff, printSnapshotEntries, printSnapshotSummary, printSnapshotTree } from "./inspect-output.js";
-import { type CollectLayer, toArtifactCountObjectFromRows, getCorpusDataDir } from "./shared.js";
+import { createArchiveResult, createFindArtifactResult, createSnapshotListItem, createSnapshotSummaryResult, diffArtifacts, listSnapshotArchives, listSnapshotInspectableFiles, resolveSnapshotArchive } from "./helpers.js";
+import { printAmbiguousArchiveMatches, printArchiveDetails, printArtifactSearchResults, printDiffSummary, printNoPreviousDiff, printSnapshotEntries, printSnapshotSummary, printSnapshotTree } from "../output/inspect.js";
+import { type CollectLayer, toArtifactCountObjectFromRows, getCorpusDataDir } from "../shared.js";
 
 export async function runInspectLatest(layer: CollectLayer, channel: ReleaseChannel, json: boolean): Promise<void> {
   const db = await ensureCorpusDatabase(getCorpusDataDir());

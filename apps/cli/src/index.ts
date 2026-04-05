@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { runCollect } from "./collect.js";
+import { runCollect } from "./collect/index.js";
 import {
   runDiffLatest,
   runFindArtifact,
@@ -11,7 +11,7 @@ import {
   runListEntries,
   runListEntriesForLatest,
   runListSnapshots,
-} from "./inspect.js";
+} from "./inspect/index.js";
 import { parseChannel, parseLayer, parseLayerFromOption, parseOption, printUsage } from "./shared.js";
 
 async function main(): Promise<void> {

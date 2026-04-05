@@ -3,8 +3,8 @@ import path from "node:path";
 import type { ArtifactRow, ArtifactSearchRow } from "@discorpus/db";
 import { createSnapshotDirName } from "@discorpus/storage";
 
-import type { ArchiveEntry, ArtifactDiff, InspectableEntry, SnapshotArtifact } from "./inspect-types.js";
-import { countKinds, toPosixPath } from "./shared.js";
+import type { ArchiveEntry, ArtifactDiff, InspectableEntry, SnapshotArtifact } from "../types/inspect.js";
+import { countKinds, toPosixPath } from "../shared.js";
 
 export function createSnapshotSummaryResult(
   snapshot: {

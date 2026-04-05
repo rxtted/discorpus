@@ -6,8 +6,8 @@ import type { WindowsDesktopInstall, WindowsDesktopManifest } from "@discorpus/p
 import { discoverWindowsDesktopInstall } from "@discorpus/platform-windows";
 import { type DiskBlobStore, type InMemorySnapshotStore } from "@discorpus/storage";
 
-import type { CliArtifactRecord, DesktopAsarArchiveRecord, DesktopAsarExtractionResult } from "./collect-types.js";
-import { toPosixPath } from "./shared.js";
+import type { CliArtifactRecord, DesktopAsarArchiveRecord, DesktopAsarExtractionResult } from "../types/collect.js";
+import { toPosixPath } from "../shared.js";
 import { extractAsarArchive } from "@discorpus/asar";
 
 export async function requireDesktopInstall(channel: import("@discorpus/core").ReleaseChannel): Promise<WindowsDesktopInstall> {
