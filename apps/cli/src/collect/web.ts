@@ -108,7 +108,7 @@ export async function collectDiscordWebManifest(
   onProgress?.("web capture: extracting runtime chunk maps from captured scripts...");
   const runtimeChunkManifest = extractRuntimeChunkManifest(declaredAssets);
   onProgress?.("web capture: deriving runtime-map assets...");
-  const assets = await mergeRuntimeMapAssets(declaredAssets, runtimeChunkManifest, document.finalUrl);
+  const assets = await mergeRuntimeMapAssets(declaredAssets, runtimeChunkManifest, document.finalUrl, onProgress);
   onProgress?.("web capture: summarizing runtime coverage...");
   runtimeDiscovery.summary = summarizeRuntimeCapture(
     capturedResources,
@@ -1217,72 +1217,118 @@ async function mergeRuntimeMapAssets(
   assets: WebCapturedAsset[],
   runtimeChunkManifest: WebRuntimeChunkManifest,
   documentUrl: string,
+  onProgress?: (message: string) => void,
 ): Promise<WebCapturedAsset[]> {
   const assetsByPath = new Map(assets.map((asset) => [asset.path, asset]));
+  const candidates = runtimeChunkManifest.derivedUrls
+    .map((url) => {
+      try {
+        const resolvedUrl = new URL(url, documentUrl);
 
-  for (const url of runtimeChunkManifest.derivedUrls) {
-    let resolvedUrl: URL;
+        if (!isDeclaredShellAssetUrl(resolvedUrl)) {
+          return null;
+        }
 
-    try {
-      resolvedUrl = new URL(url, documentUrl);
-    } catch {
-      continue;
+        const finalUrl = resolvedUrl.toString();
+        const path = createWebArtifactPath(finalUrl);
+        const runtimeMapSources = runtimeChunkManifest.chunkMaps
+          .filter((item) => runtimeChunkManifestUrlMatchesMap(item, finalUrl))
+          .map((item) => item.sourcePath)
+          .sort();
+
+        return {
+          finalUrl,
+          path,
+          runtimeMapSources,
+        };
+      } catch {
+        return null;
+      }
+    })
+    .filter((value): value is { finalUrl: string; path: string; runtimeMapSources: string[] } => value !== null)
+    .sort((left, right) => compareRuntimeMapCandidatePriority(left.finalUrl, right.finalUrl));
+  const total = candidates.length;
+  let completed = 0;
+  let added = 0;
+  let skipped = 0;
+  let lastProgressAt = 0;
+
+  const emitProgress = (force = false) => {
+    if (!onProgress) {
+      return;
     }
 
-    if (!isDeclaredShellAssetUrl(resolvedUrl)) {
-      continue;
+    const now = Date.now();
+
+    if (!force && now - lastProgressAt < 1000) {
+      return;
     }
 
-    const finalUrl = resolvedUrl.toString();
-    const path = createWebArtifactPath(finalUrl);
-    const runtimeMapSources = runtimeChunkManifest.chunkMaps
-      .filter((item) => runtimeChunkManifestUrlMatchesMap(item, finalUrl))
-      .map((item) => item.sourcePath)
-      .sort();
-    const existing = assetsByPath.get(path);
+    lastProgressAt = now;
+    onProgress(`web capture: deriving runtime-map assets ${completed}/${total} added=${added} skipped=${skipped}`);
+  };
+
+  await withConcurrency(candidates, 20, async (candidate) => {
+    const existing = assetsByPath.get(candidate.path);
 
     if (existing) {
-      if (!existing.runtimeMapSources?.length && runtimeMapSources.length > 0) {
-        existing.runtimeMapSources = runtimeMapSources;
+      if (!existing.runtimeMapSources?.length && candidate.runtimeMapSources.length > 0) {
+        existing.runtimeMapSources = candidate.runtimeMapSources;
       }
-      continue;
+      skipped += 1;
+      completed += 1;
+      emitProgress();
+      return;
     }
 
     let body: Uint8Array;
 
     try {
-      body = await fetchBuffer(finalUrl);
+      body = await fetchBuffer(candidate.finalUrl);
     } catch {
-      continue;
+      skipped += 1;
+      completed += 1;
+      emitProgress();
+      return;
     }
 
     if (body.length === 0) {
-      continue;
+      skipped += 1;
+      completed += 1;
+      emitProgress();
+      return;
     }
 
-    const resourceType = inferDeclaredResourceType(finalUrl);
-    const kind = classifyWebArtifact(finalUrl, null, resourceType);
+    const resourceType = inferDeclaredResourceType(candidate.finalUrl);
+    const kind = classifyWebArtifact(candidate.finalUrl, null, resourceType);
 
     if (kind === "web_unknown") {
-      continue;
+      skipped += 1;
+      completed += 1;
+      emitProgress();
+      return;
     }
 
-    assetsByPath.set(path, {
+    assetsByPath.set(candidate.path, {
       body,
       contentType: null,
       declarationKinds: [],
-      finalUrl,
+      finalUrl: candidate.finalUrl,
       kind,
-      path,
+      path: candidate.path,
       provenance: "runtime_map",
       resourceType,
-      runtimeMapSources,
+      runtimeMapSources: candidate.runtimeMapSources,
       sha256: hashBuffer(body),
       size: body.length,
       status: 200,
-      url: finalUrl,
+      url: candidate.finalUrl,
     });
-  }
+    added += 1;
+    completed += 1;
+    emitProgress();
+  });
+  emitProgress(true);
 
   return [...assetsByPath.values()].sort((left, right) => left.path.localeCompare(right.path));
 }
@@ -1419,6 +1465,46 @@ function runtimeChunkManifestUrlMatchesMap(
   } catch {
     return false;
   }
+}
+
+function compareRuntimeMapCandidatePriority(leftUrl: string, rightUrl: string): number {
+  return getRuntimeMapPriority(leftUrl) - getRuntimeMapPriority(rightUrl) || leftUrl.localeCompare(rightUrl);
+}
+
+function getRuntimeMapPriority(url: string): number {
+  const extension = path.posix.extname(new URL(url).pathname).toLowerCase();
+
+  switch (extension) {
+    case ".js":
+    case ".mjs":
+      return 0;
+    case ".css":
+      return 1;
+    case ".map":
+      return 2;
+    case ".wasm":
+      return 3;
+    default:
+      return 4;
+  }
+}
+
+async function withConcurrency<T>(
+  items: T[],
+  limit: number,
+  worker: (item: T, index: number) => Promise<void>,
+): Promise<void> {
+  let nextIndex = 0;
+
+  await Promise.all(
+    Array.from({ length: Math.min(limit, items.length) }, async () => {
+      while (nextIndex < items.length) {
+        const currentIndex = nextIndex;
+        nextIndex += 1;
+        await worker(items[currentIndex], currentIndex);
+      }
+    }),
+  );
 }
 
 function isDeclaredShellAssetUrl(url: URL): boolean {
