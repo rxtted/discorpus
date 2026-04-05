@@ -1,15 +1,13 @@
 import { createHash } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
 
 import type { ReleaseChannel, VersionSignal } from "@discorpus/core";
 import {
   captureDevtoolsNetwork,
   listDevtoolsTargets,
-  pickPreferredDevtoolsTarget,
   waitForDevtoolsVersion,
   type DevtoolsCapturedResource,
+  type DevtoolsTargetInfo,
 } from "@discorpus/runtime-cdp";
 import { createWindowsDesktopLaunchPlan, discoverWindowsDesktopInstall, launchWindowsDesktopClient } from "@discorpus/platform-windows";
 import type { DiskBlobStore, InMemorySnapshotStore } from "@discorpus/storage";
@@ -208,12 +206,10 @@ async function collectDiscordWebRuntimeDiscovery(channel: ReleaseChannel): Promi
   }
 
   const remoteDebuggingPort = 9222;
-  const tempUserDataDir = await mkdtemp(path.join(os.tmpdir(), "discorpus-runtime-"));
   const launchOptions = {
     remoteDebuggingPort,
     startMinimized: false,
     useUpdater: false,
-    userDataDir: tempUserDataDir,
   };
   const launchPlan = createWindowsDesktopLaunchPlan(install, launchOptions);
   const child = launchWindowsDesktopClient(install, launchOptions);
@@ -222,11 +218,11 @@ async function collectDiscordWebRuntimeDiscovery(channel: ReleaseChannel): Promi
   try {
     const version = await waitForDevtoolsVersion(devtoolsBaseUrl, { timeoutMs: 15000 });
     const targets = await waitForDiscordTargets(devtoolsBaseUrl);
-    const selectedTarget = pickPreferredDevtoolsTarget(targets);
+    const selectedTarget = pickRuntimeCaptureTarget(targets);
     const capture = selectedTarget?.webSocketDebuggerUrl
       ? await captureDevtoolsNetwork(selectedTarget.webSocketDebuggerUrl, {
-          overallTimeoutMs: 15000,
-          quietPeriodMs: 3000,
+          overallTimeoutMs: 30000,
+          quietPeriodMs: 5000,
           reloadOnAttach: true,
         })
       : null;
@@ -242,7 +238,6 @@ async function collectDiscordWebRuntimeDiscovery(channel: ReleaseChannel): Promi
     };
   } finally {
     child.kill();
-    await rm(tempUserDataDir, { force: true, recursive: true });
   }
 }
 
@@ -250,14 +245,14 @@ async function waitForDiscordTargets(baseUrl: string): Promise<ReturnType<typeof
   const startedAt = Date.now();
   let lastTargets = await listDevtoolsTargets(baseUrl);
 
-  while (Date.now() - startedAt < 15000) {
-    const preferredTarget = pickPreferredDevtoolsTarget(lastTargets);
+  while (Date.now() - startedAt < 30000) {
+    const preferredTarget = pickRuntimeCaptureTarget(lastTargets);
 
-    if (preferredTarget?.webSocketDebuggerUrl) {
+    if (preferredTarget?.webSocketDebuggerUrl && isRemoteDiscordTarget(preferredTarget)) {
       return lastTargets;
     }
 
-    await sleep(250);
+    await sleep(500);
     lastTargets = await listDevtoolsTargets(baseUrl);
   }
 
@@ -434,6 +429,34 @@ function getDiscordWebEntryUrl(channel: ReleaseChannel): string {
     case "canary":
       return "https://canary.discord.com/app";
   }
+}
+
+function pickRuntimeCaptureTarget(targets: DevtoolsTargetInfo[]): DevtoolsTargetInfo | null {
+  const pageTargets = targets.filter((target) => target.type === "page" && target.webSocketDebuggerUrl);
+
+  if (pageTargets.length === 0) {
+    return null;
+  }
+
+  const remoteDiscordTarget = pageTargets.find(isRemoteDiscordTarget);
+
+  if (remoteDiscordTarget) {
+    return remoteDiscordTarget;
+  }
+
+  const remoteHttpTarget = pageTargets.find((target) => target.url.startsWith("https://") || target.url.startsWith("http://"));
+
+  if (remoteHttpTarget) {
+    return remoteHttpTarget;
+  }
+
+  return pageTargets[0];
+}
+
+function isRemoteDiscordTarget(target: DevtoolsTargetInfo): boolean {
+  return target.url.startsWith("https://discord.com") ||
+    target.url.startsWith("https://ptb.discord.com") ||
+    target.url.startsWith("https://canary.discord.com");
 }
 
 function hashBuffer(buffer: Uint8Array): string {
