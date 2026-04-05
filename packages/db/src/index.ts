@@ -35,9 +35,9 @@ export interface ArtifactKindCountRow {
   kind: string;
 }
 
-export interface SnapshotLookupRow extends LatestSnapshotRow {}
+export type SnapshotLookupRow = LatestSnapshotRow;
 
-export interface SnapshotListRow extends LatestSnapshotRow {}
+export type SnapshotListRow = LatestSnapshotRow;
 
 export interface ArtifactSearchFilters {
   kind?: string;
