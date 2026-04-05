@@ -88,6 +88,33 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (normalizedArgs[0] === "inspect" && normalizedArgs[1] === "list") {
+    const snapshotId = normalizedArgs[2];
+
+    if (!snapshotId) {
+      printUsage();
+      process.exitCode = 1;
+      return;
+    }
+
+    await runInspectList(snapshotId, json);
+    return;
+  }
+
+  if (normalizedArgs[0] === "inspect" && normalizedArgs[1] === "archive") {
+    const snapshotId = normalizedArgs[2];
+    const archiveName = parseOption(normalizedArgs.slice(3), "--name");
+
+    if (!snapshotId || !archiveName) {
+      printUsage();
+      process.exitCode = 1;
+      return;
+    }
+
+    await runInspectArchive(snapshotId, archiveName, json);
+    return;
+  }
+
   if (normalizedArgs[0] === "find" && normalizedArgs[1] === "artifact") {
     const sha256 = parseOption(normalizedArgs.slice(2), "--sha256");
     const kind = parseOption(normalizedArgs.slice(2), "--kind");
@@ -348,6 +375,122 @@ async function runFindArtifact(
     console.log(`observed at: ${result.observed_at}`);
     console.log(`sha256: ${result.sha256}`);
     console.log(`blob: ${result.blob_path ?? "none"}`);
+  }
+}
+
+async function runInspectList(snapshotId: string, json: boolean): Promise<void> {
+  const db = await ensureCorpusDatabase(path.join(process.cwd(), "data"));
+  const snapshot = getSnapshotByIdOrDirName(db.databasePath, snapshotId);
+
+  if (!snapshot) {
+    console.error(`snapshot not found: ${snapshotId}`);
+    process.exitCode = 1;
+    return;
+  }
+
+  const artifacts = getArtifactsBySnapshotId(db.databasePath, snapshot.id);
+  const archives = listSnapshotArchives(artifacts);
+  const files = listSnapshotInspectableFiles(artifacts);
+  const result = {
+    archives,
+    files,
+    snapshotId: snapshot.id,
+  };
+
+  if (json) {
+    console.log(JSON.stringify(result, null, 2));
+    return;
+  }
+
+  console.log("discorpus");
+  console.log(`command: inspect list ${snapshotId}`);
+  console.log(`snapshot id: ${snapshot.id}`);
+  console.log(`archives: ${archives.length}`);
+
+  for (const archive of archives) {
+    console.log(`${archive.name} ${archive.path}`);
+  }
+
+  console.log(`files: ${files.length}`);
+
+  for (const file of files.slice(0, 40)) {
+    console.log(`${file.kind} ${file.path}`);
+  }
+}
+
+async function runInspectArchive(snapshotId: string, archiveName: string, json: boolean): Promise<void> {
+  const db = await ensureCorpusDatabase(path.join(process.cwd(), "data"));
+  const snapshot = getSnapshotByIdOrDirName(db.databasePath, snapshotId);
+
+  if (!snapshot) {
+    console.error(`snapshot not found: ${snapshotId}`);
+    process.exitCode = 1;
+    return;
+  }
+
+  const artifacts = getArtifactsBySnapshotId(db.databasePath, snapshot.id);
+  const archives = listSnapshotArchives(artifacts);
+  const archive = resolveSnapshotArchive(archives, archiveName);
+
+  if (!archive) {
+    console.error(`archive not found in snapshot: ${archiveName}`);
+    process.exitCode = 1;
+    return;
+  }
+
+  if (Array.isArray(archive)) {
+    console.error(`archive name is ambiguous: ${archiveName}`);
+    console.error("matches:");
+
+    for (const match of archive) {
+      console.error(`${match.name} ${match.path}`);
+    }
+
+    process.exitCode = 1;
+    return;
+  }
+
+  const extractedArtifacts = artifacts.filter((item) => item.path.startsWith(`asar/${archive.path}!/`));
+  const topLevelEntries = summarizeArchiveTopLevelEntries(extractedArtifacts, archive.path);
+  const kindCounts = countArtifactKindsFromRows(extractedArtifacts);
+  const result = {
+    archive: {
+      kind: archive.kind,
+      name: archive.name,
+      path: archive.path,
+      sha256: archive.sha256,
+      size: archive.size,
+    },
+    extractedFileCount: extractedArtifacts.length,
+    extractedKindCounts: toArtifactCountObject(kindCounts),
+    snapshotId: snapshot.id,
+    topLevelEntries,
+    sampleFiles: extractedArtifacts.slice(0, 20).map((item) => ({
+      kind: item.kind,
+      path: item.path,
+      sha256: item.sha256,
+    })),
+  };
+
+  if (json) {
+    console.log(JSON.stringify(result, null, 2));
+    return;
+  }
+
+  console.log("discorpus");
+  console.log(`command: inspect archive ${snapshotId} --name ${archiveName}`);
+  console.log(`snapshot id: ${snapshot.id}`);
+  console.log(`archive: ${archive.name}`);
+  console.log(`archive path: ${archive.path}`);
+  console.log(`archive kind: ${archive.kind}`);
+  console.log(`archive sha256: ${archive.sha256}`);
+  console.log(`archive size: ${archive.size}`);
+  console.log(`extracted files: ${extractedArtifacts.length}`);
+  console.log(`extracted kinds: ${formatArtifactCounts(kindCounts)}`);
+  console.log(`top level: ${topLevelEntries.join(", ") || "none"}`);
+
+  for (const item of extractedArtifacts.slice(0, 20)) {
+    console.log(`${item.kind} ${item.path}`);
   }
 }
 
@@ -697,6 +840,20 @@ function formatArtifactCounts(counts: Map<string, number>): string {
     .join(", ");
 }
 
+function countArtifactKindsFromRows(
+  rows: Array<{
+    kind: string;
+  }>,
+): Map<string, number> {
+  const counts = new Map<string, number>();
+
+  for (const row of rows) {
+    counts.set(row.kind, (counts.get(row.kind) ?? 0) + 1);
+  }
+
+  return counts;
+}
+
 function parseLayer(value: string | undefined): CollectLayer | null {
   if (value === "desktop" || value === "web") {
     return value;
@@ -787,10 +944,145 @@ function diffArtifacts(
   };
 }
 
+function listSnapshotArchives(
+  artifacts: Array<{
+    kind: string;
+    path: string;
+    sha256: string;
+    size: number;
+  }>,
+): Array<{
+  kind: string;
+  name: string;
+  path: string;
+  sha256: string;
+  size: number;
+}> {
+  return artifacts
+    .filter((artifact) => artifact.kind === "app_asar" || artifact.kind === "module_asar")
+    .map((artifact) => ({
+      kind: artifact.kind,
+      name: path.posix.basename(toPosixPath(artifact.path)),
+      path: toPosixPath(artifact.path),
+      sha256: artifact.sha256,
+      size: artifact.size,
+    }))
+    .sort((left, right) => left.path.localeCompare(right.path));
+}
+
+function listSnapshotInspectableFiles(
+  artifacts: Array<{
+    kind: string;
+    path: string;
+  }>,
+): Array<{
+  kind: string;
+  path: string;
+}> {
+  return artifacts
+    .filter((artifact) =>
+      artifact.kind === "updater" ||
+      artifact.kind === "desktop_executable" ||
+      artifact.kind === "app_asar" ||
+      artifact.kind === "module_asar" ||
+      artifact.kind === "update_package" ||
+      artifact.kind === "update_releases" ||
+      artifact.kind === "module_manifest" ||
+      artifact.kind === "module_package",
+    )
+    .map((artifact) => ({
+      kind: artifact.kind,
+      path: toPosixPath(artifact.path),
+    }))
+    .sort((left, right) => left.path.localeCompare(right.path));
+}
+
+function resolveSnapshotArchive(
+  archives: Array<{
+    kind: string;
+    name: string;
+    path: string;
+    sha256: string;
+    size: number;
+  }>,
+  value: string,
+):
+  | {
+      kind: string;
+      name: string;
+      path: string;
+      sha256: string;
+      size: number;
+    }
+  | Array<{
+      kind: string;
+      name: string;
+      path: string;
+      sha256: string;
+      size: number;
+    }>
+  | null {
+  const normalizedValue = toPosixPath(value);
+  const exactNameMatches = archives.filter((archive) => archive.name === normalizedValue);
+
+  if (exactNameMatches.length === 1) {
+    return exactNameMatches[0];
+  }
+
+  if (exactNameMatches.length > 1) {
+    return exactNameMatches;
+  }
+
+  const exactPathMatches = archives.filter((archive) => archive.path === normalizedValue);
+
+  if (exactPathMatches.length === 1) {
+    return exactPathMatches[0];
+  }
+
+  if (exactPathMatches.length > 1) {
+    return exactPathMatches;
+  }
+
+  const suffixMatches = archives.filter((archive) => archive.path.endsWith(`/${normalizedValue}`) || archive.path.endsWith(normalizedValue));
+
+  if (suffixMatches.length === 1) {
+    return suffixMatches[0];
+  }
+
+  if (suffixMatches.length > 1) {
+    return suffixMatches;
+  }
+
+  return null;
+}
+
+function summarizeArchiveTopLevelEntries(
+  artifacts: Array<{
+    path: string;
+  }>,
+  archivePath: string,
+): string[] {
+  const prefix = `asar/${archivePath}!/`;
+  const names = new Set<string>();
+
+  for (const artifact of artifacts) {
+    const relativePath = artifact.path.slice(prefix.length);
+    const topLevelEntry = relativePath.split("/")[0];
+
+    if (topLevelEntry) {
+      names.add(topLevelEntry);
+    }
+  }
+
+  return [...names].sort();
+}
+
 function printUsage(): void {
   console.error("usage: discorpus collect <desktop|web> --channel <stable|ptb|canary>");
   console.error("usage: discorpus inspect latest --channel <stable|ptb|canary> --layer <desktop|web>");
   console.error("usage: discorpus inspect snapshot <snapshot-id>");
+  console.error("usage: discorpus inspect list <snapshot-id>");
+  console.error("usage: discorpus inspect archive <snapshot-id> --name <archive-name>");
   console.error("usage: discorpus find artifact [--sha256 <hash>] [--kind <kind>] [--path <path-fragment>]");
   console.error("usage: discorpus diff latest --channel <stable|ptb|canary> --layer <desktop|web>");
   console.error("optional: add --json for structured output");
