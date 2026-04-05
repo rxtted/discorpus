@@ -20,6 +20,7 @@ export interface SnapshotPaths {
   dirName: string;
   rootDir: string;
   desktopDir: string;
+  webDir: string;
 }
 
 export class DiskBlobStore implements BlobStore {
@@ -88,13 +89,16 @@ export async function createSnapshotPaths(baseDir: string, snapshotId: string): 
   const dirName = createSnapshotDirName(snapshotId);
   const rootDir = path.join(baseDir, dirName);
   const desktopDir = path.join(rootDir, "desktop");
+  const webDir = path.join(rootDir, "web");
 
   await mkdir(desktopDir, { recursive: true });
+  await mkdir(webDir, { recursive: true });
 
   return {
     dirName,
     rootDir,
     desktopDir,
+    webDir,
   };
 }
 

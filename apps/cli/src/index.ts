@@ -46,6 +46,35 @@ interface DesktopAsarExtractionResult extends DesktopAsarExtraction {
   records: ReturnType<InMemorySnapshotStore["createArtifactRecord"]>[];
 }
 
+interface WebCapturedDocument {
+  contentType: string | null;
+  finalUrl: string;
+  sha256: string;
+  size: number;
+  status: number;
+  url: string;
+}
+
+interface WebCapturedAsset {
+  contentType: string | null;
+  finalUrl: string;
+  kind: string;
+  path: string;
+  sha256: string;
+  size: number;
+  status: number;
+  url: string;
+}
+
+interface WebCaptureManifest {
+  assetUrls: string[];
+  assets: WebCapturedAsset[];
+  buildNumber: string | null;
+  channel: ReleaseChannel;
+  document: WebCapturedDocument;
+  entryUrl: string;
+}
+
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const json = args.includes("--json");
@@ -200,7 +229,10 @@ async function runCollect(layer: CollectLayer, channel: ReleaseChannel, json: bo
   let desktopManifest: WindowsDesktopManifest | null = null;
   let desktopArtifactRecords: ReturnType<InMemorySnapshotStore["createArtifactRecord"]>[] = [];
   let desktopAsarExtraction: DesktopAsarExtractionResult | null = null;
+  let webManifest: WebCaptureManifest | null = null;
+  let webArtifactRecords: ReturnType<InMemorySnapshotStore["createArtifactRecord"]>[] = [];
   let signals: VersionSignal[];
+  let normalizedFingerprint = "pending";
 
   if (layer === "desktop") {
     desktopInstall = await requireDesktopInstall(channel);
@@ -219,23 +251,24 @@ async function runCollect(layer: CollectLayer, channel: ReleaseChannel, json: bo
     };
     signals = collectDesktopSignals(desktopInstall, desktopManifest);
   } else {
-    signals = [
-      {
-        scope: "web",
-        name: "collection_stub",
-        value: channel,
-        confidence: "medium",
-      },
-    ];
+    webManifest = await collectDiscordWebManifest(channel);
+    webArtifactRecords = await createWebArtifactRecords(snapshot.id, snapshotStore, blobStore, webManifest);
+    snapshot.release = {
+      appVersion: webManifest.buildNumber ?? undefined,
+      releaseId: channel,
+    };
+    signals = collectWebSignals(webManifest);
+    normalizedFingerprint = createWebNormalizedFingerprint(webManifest);
   }
+  const artifactRecords = layer === "desktop" ? desktopArtifactRecords : webArtifactRecords;
   const versionSet = createVersionSet({
     key: snapshotKey,
     observedAt,
-    normalizedFingerprint: "pending",
+    normalizedFingerprint,
     signals,
   });
   const collectResult = {
-    artifactKindCounts: desktopManifest ? toArtifactCountObject(countArtifactKinds(desktopArtifactRecords)) : {},
+    artifactKindCounts: toArtifactCountObject(countArtifactKinds(artifactRecords)),
     channel,
     corpusVersionId: versionSet.decision.corpusVersionId,
     layer,
@@ -243,7 +276,7 @@ async function runCollect(layer: CollectLayer, channel: ReleaseChannel, json: bo
     release: snapshot.release,
     snapshotId: snapshot.id,
     snapshotKey: formatSnapshotKey(snapshotKey),
-    status: `${layer} collection ${layer === "desktop" ? "discovery" : "stub"} ready`,
+    status: `${layer} collection ${layer === "desktop" ? "discovery" : "capture"} ready`,
     upstreamSummary: formatUpstreamSummary(snapshot.release.appVersion, snapshot.release.releaseId, signals),
     upstreamVersionId: versionSet.decision.upstreamVersionId,
   };
@@ -271,6 +304,14 @@ async function runCollect(layer: CollectLayer, channel: ReleaseChannel, json: bo
       dataDir,
     );
     const dbPath = await persistSnapshotIndex(snapshot, desktopArtifactRecords, versionSet, dataDir);
+    console.log(`snapshot dir: ${snapshotDir}`);
+    console.log(`sqlite db: ${dbPath}`);
+    console.log(`corpus dir: ${dataDir}`);
+  }
+  if (webManifest) {
+    printWebManifest(webArtifactRecords, webManifest);
+    const snapshotDir = await persistWebSnapshot(snapshot, webManifest, webArtifactRecords, versionSet, dataDir);
+    const dbPath = await persistSnapshotIndex(snapshot, webArtifactRecords, versionSet, dataDir);
     console.log(`snapshot dir: ${snapshotDir}`);
     console.log(`sqlite db: ${dbPath}`);
     console.log(`corpus dir: ${dataDir}`);
@@ -779,6 +820,138 @@ function collectDesktopSignals(
   return signals;
 }
 
+function collectWebSignals(manifest: WebCaptureManifest): VersionSignal[] {
+  const signals: VersionSignal[] = [
+    {
+      scope: "web",
+      name: "entry_url",
+      value: manifest.entryUrl,
+      confidence: "high",
+    },
+    {
+      scope: "web",
+      name: "final_url",
+      value: manifest.document.finalUrl,
+      confidence: "high",
+    },
+    {
+      scope: "web",
+      name: "document_sha256",
+      value: manifest.document.sha256,
+      confidence: "high",
+    },
+    {
+      scope: "web",
+      name: "asset_count",
+      value: String(manifest.assets.length),
+      confidence: "medium",
+    },
+  ];
+
+  if (manifest.buildNumber) {
+    signals.push({
+      scope: "web",
+      name: "build_number",
+      value: manifest.buildNumber,
+      confidence: "high",
+    });
+  }
+
+  for (const asset of manifest.assets) {
+    signals.push({
+      scope: "web",
+      name: "asset_path",
+      value: asset.path,
+      confidence: "medium",
+    });
+  }
+
+  return signals;
+}
+
+function createWebNormalizedFingerprint(manifest: WebCaptureManifest): string {
+  const fingerprint = createHash("sha256");
+
+  fingerprint.update(manifest.document.sha256);
+
+  for (const asset of manifest.assets) {
+    fingerprint.update(`${asset.path}:${asset.sha256}`);
+  }
+
+  return fingerprint.digest("hex");
+}
+
+async function collectDiscordWebManifest(channel: ReleaseChannel): Promise<WebCaptureManifest> {
+  const entryUrl = getDiscordWebEntryUrl(channel);
+  const document = await fetchWebDocument(entryUrl);
+  const html = (await fetchBuffer(document.finalUrl)).toString("utf8");
+  const assetUrls = discoverWebAssetUrls(html, document.finalUrl);
+  const assets: WebCapturedAsset[] = [];
+
+  for (const assetUrl of assetUrls) {
+    assets.push(await fetchWebAsset(assetUrl));
+  }
+
+  return {
+    assetUrls,
+    assets,
+    buildNumber: extractWebBuildNumber(html),
+    channel,
+    document,
+    entryUrl,
+  };
+}
+
+async function fetchWebDocument(url: string): Promise<WebCapturedDocument> {
+  const response = await fetch(url, {
+    redirect: "follow",
+    headers: {
+      "user-agent": "discorpus/0.1.0",
+    },
+  });
+
+  const buffer = Buffer.from(await response.arrayBuffer());
+
+  if (!response.ok) {
+    throw new Error(`web document request failed: ${response.status} ${response.url}`);
+  }
+
+  return {
+    contentType: response.headers.get("content-type"),
+    finalUrl: response.url,
+    sha256: hashBuffer(buffer),
+    size: buffer.length,
+    status: response.status,
+    url,
+  };
+}
+
+async function fetchWebAsset(url: string): Promise<WebCapturedAsset> {
+  const response = await fetch(url, {
+    redirect: "follow",
+    headers: {
+      "user-agent": "discorpus/0.1.0",
+    },
+  });
+
+  const buffer = Buffer.from(await response.arrayBuffer());
+
+  if (!response.ok) {
+    throw new Error(`web asset request failed: ${response.status} ${response.url}`);
+  }
+
+  return {
+    contentType: response.headers.get("content-type"),
+    finalUrl: response.url,
+    kind: classifyWebArtifact(response.url, response.headers.get("content-type")),
+    path: createWebArtifactPath(response.url),
+    sha256: hashBuffer(buffer),
+    size: buffer.length,
+    status: response.status,
+    url,
+  };
+}
+
 async function requireDesktopInstall(channel: ReleaseChannel): Promise<WindowsDesktopInstall> {
   const install = await discoverWindowsDesktopInstall(channel);
 
@@ -834,6 +1007,24 @@ function printDesktopManifest(
   }
 }
 
+function printWebManifest(
+  records: ReturnType<InMemorySnapshotStore["createArtifactRecord"]>[],
+  manifest: WebCaptureManifest,
+): void {
+  const counts = countArtifactKinds(records);
+
+  console.log(`web entry url: ${manifest.entryUrl}`);
+  console.log(`web final url: ${manifest.document.finalUrl}`);
+  console.log(`web document status: ${manifest.document.status}`);
+  console.log(`web build number: ${manifest.buildNumber ?? "none"}`);
+  console.log(`web asset count: ${manifest.assets.length}`);
+  console.log(`web artifact kinds: ${formatArtifactCounts(counts)}`);
+
+  for (const asset of manifest.assets.slice(0, 12)) {
+    console.log(`asset ${asset.kind}: ${asset.path} ${asset.sha256}`);
+  }
+}
+
 async function createDesktopArtifactRecords(
   snapshotId: string,
   snapshotStore: InMemorySnapshotStore,
@@ -853,6 +1044,44 @@ async function createDesktopArtifactRecords(
       blob,
     });
   }));
+}
+
+async function createWebArtifactRecords(
+  snapshotId: string,
+  snapshotStore: InMemorySnapshotStore,
+  blobStore: DiskBlobStore,
+  manifest: WebCaptureManifest,
+): Promise<ReturnType<InMemorySnapshotStore["createArtifactRecord"]>[]> {
+  const documentBuffer = await fetchBuffer(manifest.document.finalUrl);
+  const documentBlob = await blobStore.persistBuffer(documentBuffer, manifest.document.sha256, "raw");
+  const records: ReturnType<InMemorySnapshotStore["createArtifactRecord"]>[] = [
+    snapshotStore.createArtifactRecord({
+      snapshotId,
+      kind: "web_document",
+      path: "document/app.html",
+      sha256: manifest.document.sha256,
+      size: manifest.document.size,
+      source: manifest.document.finalUrl,
+      blob: documentBlob,
+    }),
+  ];
+
+  for (const asset of manifest.assets) {
+    const buffer = await fetchBuffer(asset.finalUrl);
+    const blob = await blobStore.persistBuffer(buffer, asset.sha256, "raw");
+
+    records.push(snapshotStore.createArtifactRecord({
+      snapshotId,
+      kind: asset.kind,
+      path: asset.path,
+      sha256: asset.sha256,
+      size: asset.size,
+      source: asset.finalUrl,
+      blob,
+    }));
+  }
+
+  return records;
 }
 
 async function createExtractedAsarArtifactRecords(
@@ -942,6 +1171,40 @@ async function persistDesktopSnapshot(
   await writeJsonFile(path.join(paths.desktopDir, "asar-archives.json"), extraction?.archives ?? []);
   await writeJsonFile(path.join(paths.desktopDir, "install.json"), manifest.install);
   await writeJsonFile(path.join(paths.desktopDir, "version.json"), versionSet.decision);
+
+  return paths.rootDir;
+}
+
+async function persistWebSnapshot(
+  snapshot: ReturnType<InMemorySnapshotStore["createSnapshotRecord"]>,
+  manifest: WebCaptureManifest,
+  records: ReturnType<InMemorySnapshotStore["createArtifactRecord"]>[],
+  versionSet: ReturnType<typeof createVersionSet>,
+  dataDir: string,
+): Promise<string> {
+  const baseDir = path.join(dataDir, "snapshots");
+  const paths = await createSnapshotPaths(baseDir, snapshot.id);
+
+  await writeJsonFile(path.join(paths.rootDir, "snapshot.json"), snapshot);
+  await writeJsonFile(path.join(paths.rootDir, "artifacts.json"), records);
+  await writeJsonFile(
+    path.join(paths.rootDir, "blob-index.json"),
+    records.map((record) => ({
+      id: record.id,
+      path: record.path,
+      sha256: record.sha256,
+      blob: record.blob ?? null,
+    })),
+  );
+  await writeJsonFile(path.join(paths.webDir, "document.json"), manifest.document);
+  await writeJsonFile(path.join(paths.webDir, "assets.json"), manifest.assets);
+  await writeJsonFile(path.join(paths.webDir, "manifest.json"), {
+    assetUrls: manifest.assetUrls,
+    buildNumber: manifest.buildNumber,
+    channel: manifest.channel,
+    entryUrl: manifest.entryUrl,
+  });
+  await writeJsonFile(path.join(paths.webDir, "version.json"), versionSet.decision);
 
   return paths.rootDir;
 }
@@ -1124,7 +1387,13 @@ function listSnapshotInspectableFiles(
       artifact.kind === "update_package" ||
       artifact.kind === "update_releases" ||
       artifact.kind === "module_manifest" ||
-      artifact.kind === "module_package",
+      artifact.kind === "module_package" ||
+      artifact.kind === "web_document" ||
+      artifact.kind === "web_script" ||
+      artifact.kind === "web_stylesheet" ||
+      artifact.kind === "web_json" ||
+      artifact.kind === "web_source_map" ||
+      artifact.kind === "web_asset",
     )
     .map((artifact) => ({
       kind: artifact.kind,
@@ -1295,6 +1564,125 @@ function classifyExtractedAsarArtifact(filePath: string): string {
     default:
       return "asar_file";
   }
+}
+
+function classifyWebArtifact(url: string, contentType: string | null): string {
+  const extension = path.posix.extname(new URL(url).pathname).toLowerCase();
+  const normalizedContentType = contentType?.split(";")[0].trim().toLowerCase() ?? "";
+
+  if (normalizedContentType.includes("javascript") || extension === ".js" || extension === ".mjs") {
+    return "web_script";
+  }
+
+  if (normalizedContentType.includes("css") || extension === ".css") {
+    return "web_stylesheet";
+  }
+
+  if (normalizedContentType.includes("json") || extension === ".json") {
+    return "web_json";
+  }
+
+  if (extension === ".map") {
+    return "web_source_map";
+  }
+
+  return "web_asset";
+}
+
+function createWebArtifactPath(url: string): string {
+  const parsed = new URL(url);
+  const host = sanitizePathComponent(parsed.host);
+  const pathname = parsed.pathname.replace(/^\/+/, "") || "index";
+  const query = parsed.search ? `__${sanitizePathComponent(parsed.search.slice(1))}` : "";
+
+  return `assets/${host}/${pathname}${query}`;
+}
+
+function discoverWebAssetUrls(html: string, baseUrl: string): string[] {
+  const assetUrls = new Set<string>();
+  const patterns = [
+    /<script[^>]+src="([^"]+)"/gi,
+    /<script[^>]+src='([^']+)'/gi,
+    /<link[^>]+href="([^"]+)"/gi,
+    /<link[^>]+href='([^']+)'/gi,
+  ];
+  const base = new URL(baseUrl);
+
+  for (const pattern of patterns) {
+    for (const match of html.matchAll(pattern)) {
+      const value = match[1];
+
+      if (!value) {
+        continue;
+      }
+
+      const resolvedUrl = new URL(value, baseUrl);
+
+      if (resolvedUrl.origin !== base.origin) {
+        continue;
+      }
+
+      if (resolvedUrl.pathname === "/" || resolvedUrl.pathname === "/app") {
+        continue;
+      }
+
+      assetUrls.add(resolvedUrl.toString());
+    }
+  }
+
+  return [...assetUrls].sort();
+}
+
+function extractWebBuildNumber(html: string): string | null {
+  const patterns = [
+    /BUILD_NUMBER["'\s:=]+(\d+)/i,
+    /buildNumber["'\s:=]+(\d+)/i,
+    /SENTRY_TAGS[^<]*buildId["'\s:=]+["']?([^"',}\s<]+)/i,
+  ];
+
+  for (const pattern of patterns) {
+    const match = html.match(pattern);
+
+    if (match?.[1]) {
+      return match[1];
+    }
+  }
+
+  return null;
+}
+
+async function fetchBuffer(url: string): Promise<Buffer> {
+  const response = await fetch(url, {
+    redirect: "follow",
+    headers: {
+      "user-agent": "discorpus/0.1.0",
+    },
+  });
+
+  if (!response.ok) {
+    throw new Error(`request failed: ${response.status} ${response.url}`);
+  }
+
+  return Buffer.from(await response.arrayBuffer());
+}
+
+function getDiscordWebEntryUrl(channel: ReleaseChannel): string {
+  switch (channel) {
+    case "stable":
+      return "https://discord.com/app";
+    case "ptb":
+      return "https://ptb.discord.com/app";
+    case "canary":
+      return "https://canary.discord.com/app";
+  }
+}
+
+function hashBuffer(buffer: Uint8Array): string {
+  return createHash("sha256").update(buffer).digest("hex");
+}
+
+function sanitizePathComponent(value: string): string {
+  return value.replace(/[^a-z0-9._-]+/gi, "_");
 }
 
 function toPosixPath(value: string): string {
