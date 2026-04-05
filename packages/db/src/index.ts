@@ -34,6 +34,8 @@ export interface ArtifactKindCountRow {
   kind: string;
 }
 
+export interface SnapshotLookupRow extends LatestSnapshotRow {}
+
 export async function ensureCorpusDatabase(baseDir: string): Promise<DbPaths> {
   await mkdir(baseDir, { recursive: true });
 
@@ -124,6 +126,38 @@ export function getArtifactKindCounts(
     `).all(snapshotId);
 
     return (rows as unknown) as ArtifactKindCountRow[];
+  } finally {
+    database.close();
+  }
+}
+
+export function getSnapshotById(
+  databasePath: string,
+  snapshotId: string,
+): SnapshotLookupRow | null {
+  const database = new DatabaseSync(databasePath);
+
+  try {
+    const row = database.prepare(`
+      select
+        id,
+        target,
+        channel,
+        platform,
+        layer,
+        observed_at,
+        app_version,
+        release_id,
+        upstream_version_id,
+        corpus_version_id,
+        is_new_upstream_version,
+        is_new_corpus_version
+      from snapshots
+      where id = ?
+      limit 1
+    `).get(snapshotId);
+
+    return ((row as unknown) as SnapshotLookupRow | undefined) ?? null;
   } finally {
     database.close();
   }
