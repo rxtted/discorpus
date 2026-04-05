@@ -128,6 +128,7 @@ export function listSnapshotInspectableFiles(artifacts: SnapshotArtifact[]): Ins
       artifact.kind === "web_wasm" ||
       artifact.kind === "web_font" ||
       artifact.kind === "web_image" ||
+      artifact.kind === "web_media" ||
       artifact.kind === "web_asset"
     )
     .map((artifact) => ({

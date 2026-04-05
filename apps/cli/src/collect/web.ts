@@ -428,6 +428,7 @@ async function collectRuntimeAssets(
   const assetsByPath = new Map<string, WebCapturedAsset>();
   const excludedAssets: WebExcludedAsset[] = [];
   const missedAssets: WebMissedAsset[] = [];
+  const missedWebpackAssetsByPath = new Map<string, WebMissedAsset>();
 
   for (const resource of resources) {
     if (isExcludedContentResource(resource)) {
@@ -442,11 +443,14 @@ async function collectRuntimeAssets(
       continue;
     }
 
-    if (!isPromotableDiscordResource(resource, trustedOrigins, document.finalUrl)) {
+    const webpackCandidate = isWebpackCandidateResource(resource, trustedOrigins, document.finalUrl);
+    const promotable = isPromotableDiscordResource(resource, trustedOrigins, document.finalUrl);
+
+    if (!promotable && !webpackCandidate) {
       continue;
     }
 
-    const recoveredBody = await recoverPromotableResourceBody(resource);
+    const recoveredBody = await recoverPromotableResourceBody(resource, webpackCandidate);
     const body = recoveredBody ?? resource.body ?? undefined;
     const kind = classifyWebArtifact(resource.finalUrl, resource.contentType, resource.resourceType);
     const path = createWebArtifactPath(resource.finalUrl);
@@ -466,6 +470,19 @@ async function collectRuntimeAssets(
         resourceType: resource.resourceType,
         status: resource.status,
       });
+
+      if (webpackCandidate) {
+        missedWebpackAssetsByPath.set(path, {
+          bodyError: resource.bodyError,
+          bodyState: body ? "captured_empty" : resource.bodyState,
+          contentType: resource.contentType,
+          finalUrl: resource.finalUrl,
+          path,
+          reason: !body ? "no_body" : "empty_body",
+          resourceType: resource.resourceType,
+          status: resource.status,
+        });
+      }
       continue;
     }
 
@@ -490,11 +507,36 @@ async function collectRuntimeAssets(
     }
   }
 
+  for (const resource of resources) {
+    const webpackCandidate = isWebpackCandidateResource(resource, trustedOrigins, document.finalUrl);
+
+    if (!webpackCandidate) {
+      continue;
+    }
+
+    const path = createWebArtifactPath(resource.finalUrl);
+
+    if (assetsByPath.has(path) || missedWebpackAssetsByPath.has(path)) {
+      continue;
+    }
+
+    missedWebpackAssetsByPath.set(path, {
+      bodyError: resource.bodyError,
+      bodyState: resource.bodyState,
+      contentType: resource.contentType,
+      finalUrl: resource.finalUrl,
+      path,
+      reason: classifyUnrecoveredWebpackReason(resource),
+      resourceType: resource.resourceType,
+      status: resource.status,
+    });
+  }
+
   return {
     assets: [...assetsByPath.values()].sort((left, right) => left.path.localeCompare(right.path)),
     excludedAssets: dedupeExcludedAssets(excludedAssets),
     missedAssets: missedAssets.sort((left, right) => left.path.localeCompare(right.path)),
-    missedWebpackAssets: missedAssets.filter(isMissedWebpackAsset).sort((left, right) => left.path.localeCompare(right.path)),
+    missedWebpackAssets: [...missedWebpackAssetsByPath.values()].sort((left, right) => left.path.localeCompare(right.path)),
   };
 }
 
@@ -576,6 +618,10 @@ function classifyWebArtifact(url: string, contentType: string | null, resourceTy
 
   if (extension === ".map") {
     return "web_source_map";
+  }
+
+  if (extension === ".webm" || extension === ".mp3" || extension === ".mp4" || normalizedContentType.startsWith("video/") || normalizedContentType.startsWith("audio/")) {
+    return "web_media";
   }
 
   if (extension === ".wasm" || normalizedContentType.includes("wasm")) {
@@ -788,6 +834,9 @@ function isPromotableDiscordResource(
     extension === ".json" ||
     extension === ".map" ||
     extension === ".wasm" ||
+    extension === ".webm" ||
+    extension === ".mp3" ||
+    extension === ".mp4" ||
     extension === ".woff" ||
     extension === ".woff2" ||
     extension === ".ttf" ||
@@ -852,7 +901,10 @@ function isExcludedContentResource(resource: DevtoolsCapturedResource): boolean 
     pathname.startsWith("/embed/avatars/");
 }
 
-async function recoverPromotableResourceBody(resource: DevtoolsCapturedResource): Promise<Uint8Array | null> {
+async function recoverPromotableResourceBody(
+  resource: DevtoolsCapturedResource,
+  webpackCandidate = false,
+): Promise<Uint8Array | null> {
   if (resource.body && resource.body.length > 0) {
     return resource.body;
   }
@@ -869,7 +921,7 @@ async function recoverPromotableResourceBody(resource: DevtoolsCapturedResource)
   }
 }
 
-function shouldRecoverResourceByFetch(resource: DevtoolsCapturedResource): boolean {
+function shouldRecoverResourceByFetch(resource: DevtoolsCapturedResource, webpackCandidate = false): boolean {
   try {
     const parsedUrl = new URL(resource.finalUrl);
     const extension = path.posix.extname(parsedUrl.pathname).toLowerCase();
@@ -880,7 +932,7 @@ function shouldRecoverResourceByFetch(resource: DevtoolsCapturedResource): boole
       return false;
     }
 
-    return isAssetPath || (
+    return webpackCandidate || isAssetPath || (
       extension === ".js" ||
       extension === ".mjs" ||
       extension === ".css" ||
@@ -888,6 +940,9 @@ function shouldRecoverResourceByFetch(resource: DevtoolsCapturedResource): boole
       extension === ".json" ||
       extension === ".map" ||
       extension === ".wasm" ||
+      extension === ".webm" ||
+      extension === ".mp3" ||
+      extension === ".mp4" ||
       extension === ".woff" ||
       extension === ".woff2" ||
       extension === ".ttf" ||
@@ -902,6 +957,8 @@ function shouldRecoverResourceByFetch(resource: DevtoolsCapturedResource): boole
       contentType.includes("css") ||
       contentType.includes("json") ||
       contentType.includes("wasm") ||
+      contentType.startsWith("video/") ||
+      contentType.startsWith("audio/") ||
       contentType.startsWith("font/") ||
       contentType.startsWith("image/")
     );
@@ -936,12 +993,20 @@ function dedupeExcludedAssets(assets: WebExcludedAsset[]): WebExcludedAsset[] {
   return [...assetsByPath.values()].sort((left, right) => left.path.localeCompare(right.path));
 }
 
-function isMissedWebpackAsset(asset: WebMissedAsset): boolean {
+function isWebpackCandidateResource(
+  resource: DevtoolsCapturedResource,
+  trustedOrigins: Set<string>,
+  documentUrl: string,
+): boolean {
+  if (resource.finalUrl === documentUrl) {
+    return false;
+  }
+
   try {
-    const parsedUrl = new URL(asset.finalUrl);
+    const parsedUrl = new URL(resource.finalUrl);
     const extension = path.posix.extname(parsedUrl.pathname).toLowerCase();
 
-    return parsedUrl.origin === "https://discord.com" &&
+    return trustedOrigins.has(parsedUrl.origin) &&
       parsedUrl.pathname.startsWith("/assets/") && (
         extension === ".js" ||
         extension === ".mjs" ||
@@ -953,6 +1018,26 @@ function isMissedWebpackAsset(asset: WebMissedAsset): boolean {
   } catch {
     return false;
   }
+}
+
+function classifyUnrecoveredWebpackReason(resource: DevtoolsCapturedResource): string {
+  if (resource.bodyState === "missing") {
+    return "unobserved_response_body";
+  }
+
+  if (resource.bodyState === "failed") {
+    return "body_retrieval_failed";
+  }
+
+  if (resource.bodyState === "skipped") {
+    return "body_retrieval_skipped";
+  }
+
+  if (resource.status === null) {
+    return "no_final_response_status";
+  }
+
+  return "unrecovered_after_capture";
 }
 
 function countAssetKinds(assets: WebCapturedAsset[]): Record<string, number> {
