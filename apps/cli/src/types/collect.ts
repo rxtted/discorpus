@@ -124,6 +124,7 @@ export interface WebRuntimeSummary {
   promotedKinds: Record<string, number>;
   resourceTypes: Record<string, number>;
   runtimeMapAssetCount: number;
+  runtimeMapSkippedCounts: Record<string, number>;
   sameOriginResourceCount: number;
   sameOriginWithBodyCount: number;
 }

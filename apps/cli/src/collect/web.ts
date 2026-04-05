@@ -108,7 +108,8 @@ export async function collectDiscordWebManifest(
   onProgress?.("web capture: extracting runtime chunk maps from captured scripts...");
   const runtimeChunkManifest = extractRuntimeChunkManifest(declaredAssets);
   onProgress?.("web capture: deriving runtime-map assets...");
-  const assets = await mergeRuntimeMapAssets(declaredAssets, runtimeChunkManifest, document.finalUrl, onProgress);
+  const runtimeMapResult = await mergeRuntimeMapAssets(declaredAssets, runtimeChunkManifest, document.finalUrl, onProgress);
+  const assets = runtimeMapResult.assets;
   onProgress?.("web capture: summarizing runtime coverage...");
   runtimeDiscovery.summary = summarizeRuntimeCapture(
     capturedResources,
@@ -117,6 +118,7 @@ export async function collectDiscordWebManifest(
     assets,
     missedAssets,
     missedWebpackAssets,
+    runtimeMapResult.skippedCounts,
   );
 
   return {
@@ -570,6 +572,7 @@ function summarizeRuntimeCapture(
   promotedAssets: WebCapturedAsset[],
   missedAssets: WebMissedAsset[],
   missedWebpackAssets: WebMissedAsset[],
+  runtimeMapSkippedCounts: Record<string, number>,
 ): WebRuntimeSummary {
   const trustedOrigins = createTrustedDiscordOrigins(document.finalUrl);
   const contentTypeFamilies: Record<string, number> = {};
@@ -636,6 +639,7 @@ function summarizeRuntimeCapture(
     promotedKinds: sortCountMap(countAssetKinds(promotedAssets)),
     resourceTypes: sortCountMap(resourceTypes),
     runtimeMapAssetCount,
+    runtimeMapSkippedCounts: sortCountMap(runtimeMapSkippedCounts),
     sameOriginResourceCount,
     sameOriginWithBodyCount,
   };
@@ -1218,7 +1222,10 @@ async function mergeRuntimeMapAssets(
   runtimeChunkManifest: WebRuntimeChunkManifest,
   documentUrl: string,
   onProgress?: (message: string) => void,
-): Promise<WebCapturedAsset[]> {
+): Promise<{
+  assets: WebCapturedAsset[];
+  skippedCounts: Record<string, number>;
+}> {
   const assetsByPath = new Map(assets.map((asset) => [asset.path, asset]));
   const candidates = runtimeChunkManifest.derivedUrls
     .map((url) => {
@@ -1250,7 +1257,13 @@ async function mergeRuntimeMapAssets(
   const total = candidates.length;
   let completed = 0;
   let added = 0;
-  let skipped = 0;
+  const skippedCounts: Record<string, number> = {
+    already_present: 0,
+    empty: 0,
+    fetch_failed: 0,
+    http_404: 0,
+    unknown: 0,
+  };
   let lastProgressAt = 0;
 
   const emitProgress = (force = false) => {
@@ -1265,7 +1278,9 @@ async function mergeRuntimeMapAssets(
     }
 
     lastProgressAt = now;
-    onProgress(`web capture: deriving runtime-map assets ${completed}/${total} added=${added} skipped=${skipped}`);
+    onProgress(
+      `web capture: deriving runtime-map assets ${completed}/${total} added=${added} already_present=${skippedCounts.already_present} fetch_failed=${skippedCounts.fetch_failed} 404=${skippedCounts.http_404} empty=${skippedCounts.empty} unknown=${skippedCounts.unknown}`,
+    );
   };
 
   await withConcurrency(candidates, 20, async (candidate) => {
@@ -1275,7 +1290,7 @@ async function mergeRuntimeMapAssets(
       if (!existing.runtimeMapSources?.length && candidate.runtimeMapSources.length > 0) {
         existing.runtimeMapSources = candidate.runtimeMapSources;
       }
-      skipped += 1;
+      skippedCounts.already_present += 1;
       completed += 1;
       emitProgress();
       return;
@@ -1285,15 +1300,19 @@ async function mergeRuntimeMapAssets(
 
     try {
       body = await fetchBuffer(candidate.finalUrl);
-    } catch {
-      skipped += 1;
+    } catch (error) {
+      if (error instanceof Error && error.message.includes("request failed: 404")) {
+        skippedCounts.http_404 += 1;
+      } else {
+        skippedCounts.fetch_failed += 1;
+      }
       completed += 1;
       emitProgress();
       return;
     }
 
     if (body.length === 0) {
-      skipped += 1;
+      skippedCounts.empty += 1;
       completed += 1;
       emitProgress();
       return;
@@ -1303,7 +1322,7 @@ async function mergeRuntimeMapAssets(
     const kind = classifyWebArtifact(candidate.finalUrl, null, resourceType);
 
     if (kind === "web_unknown") {
-      skipped += 1;
+      skippedCounts.unknown += 1;
       completed += 1;
       emitProgress();
       return;
@@ -1330,7 +1349,10 @@ async function mergeRuntimeMapAssets(
   });
   emitProgress(true);
 
-  return [...assetsByPath.values()].sort((left, right) => left.path.localeCompare(right.path));
+  return {
+    assets: [...assetsByPath.values()].sort((left, right) => left.path.localeCompare(right.path)),
+    skippedCounts,
+  };
 }
 
 function extractRuntimeChunkManifest(assets: WebCapturedAsset[]): WebRuntimeChunkManifest {

@@ -98,6 +98,7 @@ export function printWebManifest(records: CliArtifactRecord[], manifest: WebCapt
       console.log(`web excluded assets: ${manifest.runtimeDiscovery.summary.excludedAssetCount}`);
       console.log(`web missed assets: ${manifest.runtimeDiscovery.summary.missedAssetCount}`);
       console.log(`web missed webpack assets: ${manifest.runtimeDiscovery.summary.missedWebpackAssetCount}`);
+      console.log(`web runtime-map skipped: ${formatCountRecord(manifest.runtimeDiscovery.summary.runtimeMapSkippedCounts)}`);
       console.log(`web runtime body states: ${formatCountRecord(manifest.runtimeDiscovery.summary.bodyStates)}`);
     }
   }
