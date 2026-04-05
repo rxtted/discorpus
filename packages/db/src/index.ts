@@ -268,15 +268,32 @@ export function getSnapshotByIdOrDirName(
   databasePath: string,
   value: string,
 ): SnapshotLookupRow | null {
-  const byId = getSnapshotById(databasePath, value);
-
-  if (byId) {
-    return byId;
-  }
-
   const database = new DatabaseSync(databasePath);
 
   try {
+    const byId = database.prepare(`
+      select
+        id,
+        target,
+        channel,
+        platform,
+        layer,
+        observed_at,
+        app_version,
+        release_id,
+        upstream_version_id,
+        corpus_version_id,
+        is_new_upstream_version,
+        is_new_corpus_version
+      from snapshots
+      where id = ?
+      limit 1
+    `).get(value);
+
+    if (byId) {
+      return (byId as unknown) as SnapshotLookupRow;
+    }
+
     const rows = database.prepare(`
       select
         id,
