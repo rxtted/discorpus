@@ -12,7 +12,14 @@ import {
 import { createWindowsDesktopLaunchPlan, discoverWindowsDesktopInstall, launchWindowsDesktopClient } from "@discorpus/platform-windows";
 import type { DiskBlobStore, InMemorySnapshotStore } from "@discorpus/storage";
 
-import type { CliArtifactRecord, WebCaptureManifest, WebCapturedAsset, WebCapturedDocument, WebRuntimeDiscovery } from "../types/collect.js";
+import type {
+  CliArtifactRecord,
+  WebCaptureManifest,
+  WebCapturedAsset,
+  WebCapturedDocument,
+  WebRuntimeDiscovery,
+  WebRuntimeSummary,
+} from "../types/collect.js";
 
 const WEB_FETCH_HEADERS = { "user-agent": "discorpus/0.1.0" };
 
@@ -90,6 +97,11 @@ export async function collectDiscordWebManifest(channel: ReleaseChannel): Promis
   const runtimeAssets = collectRuntimeAssets(runtimeDiscovery.capture?.resources ?? [], runtimeDocument);
   const fallbackAssetUrls = discoverWebAssetUrls(html, runtimeDocument.finalUrl);
   const mergedAssets = await mergeRuntimeAndFallbackAssets(runtimeAssets, fallbackAssetUrls);
+  runtimeDiscovery.summary = summarizeRuntimeCapture(
+    runtimeDiscovery.capture?.resources ?? [],
+    runtimeDocument,
+    mergedAssets,
+  );
 
   return {
     assetUrls: mergedAssets.map((asset) => asset.finalUrl),
@@ -233,6 +245,7 @@ async function collectDiscordWebRuntimeDiscovery(channel: ReleaseChannel): Promi
       devtoolsBaseUrl,
       launchPlan,
       selectedTarget,
+      summary: null,
       targetCount: targets.length,
       targets,
       version,
@@ -320,6 +333,61 @@ async function mergeRuntimeAndFallbackAssets(runtimeAssets: WebCapturedAsset[], 
   }
 
   return [...assetsByUrl.values()].sort((left, right) => left.path.localeCompare(right.path));
+}
+
+function summarizeRuntimeCapture(
+  resources: DevtoolsCapturedResource[],
+  document: WebCapturedDocument,
+  promotedAssets: WebCapturedAsset[],
+): WebRuntimeSummary {
+  const documentOrigin = new URL(document.finalUrl).origin;
+  const contentTypeFamilies: Record<string, number> = {};
+  const origins: Record<string, number> = {};
+  const resourceTypes: Record<string, number> = {};
+  let capturedWithBodyCount = 0;
+  let promotableResourceCount = 0;
+  let sameOriginResourceCount = 0;
+  let sameOriginWithBodyCount = 0;
+
+  for (const resource of resources) {
+    const resourceType = resource.resourceType || "unknown";
+    resourceTypes[resourceType] = (resourceTypes[resourceType] ?? 0) + 1;
+
+    const contentTypeFamily = getContentTypeFamily(resource.contentType);
+    contentTypeFamilies[contentTypeFamily] = (contentTypeFamilies[contentTypeFamily] ?? 0) + 1;
+
+    const origin = getResourceOriginLabel(resource.finalUrl);
+    origins[origin] = (origins[origin] ?? 0) + 1;
+
+    if (resource.body) {
+      capturedWithBodyCount += 1;
+    }
+
+    if (origin === documentOrigin) {
+      sameOriginResourceCount += 1;
+
+      if (resource.body) {
+        sameOriginWithBodyCount += 1;
+      }
+    }
+
+    if (isPromotableDiscordResource(resource, documentOrigin, document.finalUrl)) {
+      promotableResourceCount += 1;
+    }
+  }
+
+  return {
+    capturedResourceCount: resources.length,
+    capturedWithBodyCount,
+    contentTypeFamilies: sortCountMap(contentTypeFamilies),
+    origins: sortCountMap(origins),
+    promotableResourceCount,
+    promotedAssetCount: promotedAssets.length,
+    promotedKinds: sortCountMap(countAssetKinds(promotedAssets)),
+    resourceTypes: sortCountMap(resourceTypes),
+    sameOriginResourceCount,
+    sameOriginWithBodyCount,
+  };
 }
 
 function classifyWebArtifact(url: string, contentType: string | null, resourceType: string): string {
@@ -532,6 +600,51 @@ function decodeUtf8Body(body: Uint8Array | undefined): string {
   }
 
   return Buffer.from(body).toString("utf8");
+}
+
+function countAssetKinds(assets: WebCapturedAsset[]): Record<string, number> {
+  const counts: Record<string, number> = {};
+
+  for (const asset of assets) {
+    counts[asset.kind] = (counts[asset.kind] ?? 0) + 1;
+  }
+
+  return counts;
+}
+
+function getContentTypeFamily(contentType: string | null): string {
+  if (!contentType) {
+    return "unknown";
+  }
+
+  const normalized = contentType.split(";")[0].trim().toLowerCase();
+  const slashIndex = normalized.indexOf("/");
+
+  if (slashIndex === -1) {
+    return normalized || "unknown";
+  }
+
+  return normalized.slice(0, slashIndex) || "unknown";
+}
+
+function getResourceOriginLabel(url: string): string {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return "unknown";
+  }
+}
+
+function sortCountMap(counts: Record<string, number>): Record<string, number> {
+  return Object.fromEntries(
+    Object.entries(counts).sort((left, right) => {
+      if (right[1] !== left[1]) {
+        return right[1] - left[1];
+      }
+
+      return left[0].localeCompare(right[0]);
+    }),
+  );
 }
 
 async function sleep(ms: number): Promise<void> {

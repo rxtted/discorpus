@@ -62,10 +62,24 @@ export interface WebCaptureManifest {
   runtimeDiscovery: WebRuntimeDiscovery | null;
 }
 
+export interface WebRuntimeSummary {
+  capturedResourceCount: number;
+  capturedWithBodyCount: number;
+  contentTypeFamilies: Record<string, number>;
+  origins: Record<string, number>;
+  promotableResourceCount: number;
+  promotedAssetCount: number;
+  promotedKinds: Record<string, number>;
+  resourceTypes: Record<string, number>;
+  sameOriginResourceCount: number;
+  sameOriginWithBodyCount: number;
+}
+
 export interface WebRuntimeDiscovery {
   devtoolsBaseUrl: string;
   launchPlan: WindowsDesktopLaunchPlan;
   selectedTarget: DevtoolsTargetInfo | null;
+  summary: WebRuntimeSummary | null;
   targetCount: number;
   targets: DevtoolsTargetInfo[];
   version: DevtoolsVersionInfo;

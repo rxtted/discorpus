@@ -49,6 +49,7 @@ export async function persistWebSnapshot(
     entryUrl: manifest.entryUrl,
   });
   await writeJsonFile(path.join(paths.webDir, "runtime-discovery.json"), serializeRuntimeDiscovery(manifest.runtimeDiscovery));
+  await writeJsonFile(path.join(paths.webDir, "runtime-summary.json"), manifest.runtimeDiscovery?.summary ?? null);
   await writeJsonFile(path.join(paths.webDir, "version.json"), versionSet.decision);
 
   return paths.rootDir;
@@ -140,6 +141,7 @@ function serializeRuntimeDiscovery(runtimeDiscovery: WebCaptureManifest["runtime
     devtoolsBaseUrl: runtimeDiscovery.devtoolsBaseUrl,
     launchPlan: runtimeDiscovery.launchPlan,
     selectedTarget: runtimeDiscovery.selectedTarget,
+    summary: runtimeDiscovery.summary,
     targetCount: runtimeDiscovery.targetCount,
     targets: runtimeDiscovery.targets,
     version: runtimeDiscovery.version,

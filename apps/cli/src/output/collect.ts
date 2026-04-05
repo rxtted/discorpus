@@ -86,6 +86,14 @@ export function printWebManifest(records: CliArtifactRecord[], manifest: WebCapt
     console.log(`web runtime targets: ${manifest.runtimeDiscovery.targets.length}`);
     console.log(`web runtime selected target: ${manifest.runtimeDiscovery.selectedTarget?.url ?? "none"}`);
     console.log(`web runtime captured resources: ${manifest.runtimeDiscovery.capture?.resources.length ?? 0}`);
+
+    if (manifest.runtimeDiscovery.summary) {
+      console.log(`web runtime resources with body: ${manifest.runtimeDiscovery.summary.capturedWithBodyCount}`);
+      console.log(`web runtime same-origin resources: ${manifest.runtimeDiscovery.summary.sameOriginResourceCount}`);
+      console.log(`web runtime same-origin with body: ${manifest.runtimeDiscovery.summary.sameOriginWithBodyCount}`);
+      console.log(`web runtime promotable resources: ${manifest.runtimeDiscovery.summary.promotableResourceCount}`);
+      console.log(`web promoted assets: ${manifest.runtimeDiscovery.summary.promotedAssetCount}`);
+    }
   }
 
   for (const asset of manifest.assets.slice(0, 12)) {
