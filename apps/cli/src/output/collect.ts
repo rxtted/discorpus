@@ -78,6 +78,13 @@ export function printWebManifest(records: CliArtifactRecord[], manifest: WebCapt
   console.log(`web build number: ${manifest.buildNumber ?? "none"}`);
   console.log(`web asset count: ${manifest.assets.length}`);
   console.log(`web artifact kinds: ${formatArtifactCounts(counts)}`);
+  console.log(`web runtime discovery: ${manifest.runtimeDiscovery ? "ready" : "none"}`);
+
+  if (manifest.runtimeDiscovery) {
+    console.log(`web devtools url: ${manifest.runtimeDiscovery.devtoolsBaseUrl}`);
+    console.log(`web runtime browser: ${manifest.runtimeDiscovery.version.browser}`);
+    console.log(`web runtime targets: ${manifest.runtimeDiscovery.targets.length}`);
+  }
 
   for (const asset of manifest.assets.slice(0, 12)) {
     console.log(`asset ${asset.kind}: ${asset.path} ${asset.sha256}`);
