@@ -93,13 +93,14 @@ export async function collectDiscordWebManifest(channel: ReleaseChannel): Promis
   }
 
   const html = decodeUtf8Body(document.body);
-  const { assets: runtimeAssets, excludedAssets, missedAssets } = await collectRuntimeAssets(capturedResources, document);
+  const { assets: runtimeAssets, excludedAssets, missedAssets, missedWebpackAssets } = await collectRuntimeAssets(capturedResources, document);
   runtimeDiscovery.summary = summarizeRuntimeCapture(
     capturedResources,
     document,
     excludedAssets,
     runtimeAssets,
     missedAssets,
+    missedWebpackAssets,
   );
 
   return {
@@ -111,6 +112,7 @@ export async function collectDiscordWebManifest(channel: ReleaseChannel): Promis
     entryUrl,
     excludedAssets,
     missedAssets,
+    missedWebpackAssets,
     runtimeDiscovery,
   };
 }
@@ -416,7 +418,12 @@ function createCapturedDocumentFromPage(pageDocument: NonNullable<NonNullable<We
 async function collectRuntimeAssets(
   resources: DevtoolsCapturedResource[],
   document: WebCapturedDocument,
-): Promise<{ assets: WebCapturedAsset[]; excludedAssets: WebExcludedAsset[]; missedAssets: WebMissedAsset[] }> {
+): Promise<{
+  assets: WebCapturedAsset[];
+  excludedAssets: WebExcludedAsset[];
+  missedAssets: WebMissedAsset[];
+  missedWebpackAssets: WebMissedAsset[];
+}> {
   const trustedOrigins = createTrustedDiscordOrigins(document.finalUrl);
   const assetsByPath = new Map<string, WebCapturedAsset>();
   const excludedAssets: WebExcludedAsset[] = [];
@@ -487,6 +494,7 @@ async function collectRuntimeAssets(
     assets: [...assetsByPath.values()].sort((left, right) => left.path.localeCompare(right.path)),
     excludedAssets: dedupeExcludedAssets(excludedAssets),
     missedAssets: missedAssets.sort((left, right) => left.path.localeCompare(right.path)),
+    missedWebpackAssets: missedAssets.filter(isMissedWebpackAsset).sort((left, right) => left.path.localeCompare(right.path)),
   };
 }
 
@@ -496,6 +504,7 @@ function summarizeRuntimeCapture(
   excludedAssets: WebExcludedAsset[],
   promotedAssets: WebCapturedAsset[],
   missedAssets: WebMissedAsset[],
+  missedWebpackAssets: WebMissedAsset[],
 ): WebRuntimeSummary {
   const trustedOrigins = createTrustedDiscordOrigins(document.finalUrl);
   const contentTypeFamilies: Record<string, number> = {};
@@ -542,6 +551,7 @@ function summarizeRuntimeCapture(
     contentTypeFamilies: sortCountMap(contentTypeFamilies),
     excludedAssetCount: excludedAssets.length,
     missedAssetCount: missedAssets.length,
+    missedWebpackAssetCount: missedWebpackAssets.length,
     origins: sortCountMap(origins),
     promotableResourceCount,
     promotedAssetCount: promotedAssets.length,
@@ -558,6 +568,10 @@ function classifyWebArtifact(url: string, contentType: string | null, resourceTy
 
   if (resourceType === "Document") {
     return "web_document";
+  }
+
+  if (extension === ".html" || normalizedContentType.includes("text/html")) {
+    return "web_html";
   }
 
   if (extension === ".map") {
@@ -770,6 +784,7 @@ function isPromotableDiscordResource(
   return extension === ".js" ||
     extension === ".mjs" ||
     extension === ".css" ||
+    extension === ".html" ||
     extension === ".json" ||
     extension === ".map" ||
     extension === ".wasm" ||
@@ -816,6 +831,10 @@ function isExcludedContentResource(resource: DevtoolsCapturedResource): boolean 
     return false;
   }
 
+  if (parsedUrl.origin === "https://discord.com" && parsedUrl.pathname.toLowerCase().startsWith("/api/")) {
+    return true;
+  }
+
   if (parsedUrl.origin !== "https://cdn.discordapp.com" && parsedUrl.origin !== "https://media.discordapp.net") {
     return false;
   }
@@ -851,19 +870,21 @@ async function recoverPromotableResourceBody(resource: DevtoolsCapturedResource)
 }
 
 function shouldRecoverResourceByFetch(resource: DevtoolsCapturedResource): boolean {
-  if (resource.status === null || resource.status < 200 || resource.status >= 400) {
-    return false;
-  }
-
   try {
     const parsedUrl = new URL(resource.finalUrl);
     const extension = path.posix.extname(parsedUrl.pathname).toLowerCase();
     const contentType = resource.contentType?.toLowerCase() ?? "";
+    const isAssetPath = parsedUrl.origin === "https://discord.com" && parsedUrl.pathname.startsWith("/assets/");
 
-    return parsedUrl.pathname.startsWith("/assets/") || (
+    if (resource.status !== null && (resource.status < 200 || resource.status >= 400)) {
+      return false;
+    }
+
+    return isAssetPath || (
       extension === ".js" ||
       extension === ".mjs" ||
       extension === ".css" ||
+      extension === ".html" ||
       extension === ".json" ||
       extension === ".map" ||
       extension === ".wasm" ||
@@ -913,6 +934,25 @@ function dedupeExcludedAssets(assets: WebExcludedAsset[]): WebExcludedAsset[] {
   }
 
   return [...assetsByPath.values()].sort((left, right) => left.path.localeCompare(right.path));
+}
+
+function isMissedWebpackAsset(asset: WebMissedAsset): boolean {
+  try {
+    const parsedUrl = new URL(asset.finalUrl);
+    const extension = path.posix.extname(parsedUrl.pathname).toLowerCase();
+
+    return parsedUrl.origin === "https://discord.com" &&
+      parsedUrl.pathname.startsWith("/assets/") && (
+        extension === ".js" ||
+        extension === ".mjs" ||
+        extension === ".css" ||
+        extension === ".html" ||
+        extension === ".map" ||
+        extension === ".wasm"
+      );
+  } catch {
+    return false;
+  }
 }
 
 function countAssetKinds(assets: WebCapturedAsset[]): Record<string, number> {

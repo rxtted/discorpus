@@ -120,6 +120,7 @@ export function listSnapshotInspectableFiles(artifacts: SnapshotArtifact[]): Ins
       artifact.kind === "module_manifest" ||
       artifact.kind === "module_package" ||
       artifact.kind === "web_document" ||
+      artifact.kind === "web_html" ||
       artifact.kind === "web_script" ||
       artifact.kind === "web_stylesheet" ||
       artifact.kind === "web_json" ||

@@ -61,6 +61,7 @@ export interface WebCaptureManifest {
   entryUrl: string;
   excludedAssets: WebExcludedAsset[];
   missedAssets: WebMissedAsset[];
+  missedWebpackAssets: WebMissedAsset[];
   runtimeDiscovery: WebRuntimeDiscovery | null;
 }
 
@@ -90,6 +91,7 @@ export interface WebRuntimeSummary {
   capturedWithBodyCount: number;
   excludedAssetCount: number;
   missedAssetCount: number;
+  missedWebpackAssetCount: number;
   contentTypeFamilies: Record<string, number>;
   origins: Record<string, number>;
   promotableResourceCount: number;
