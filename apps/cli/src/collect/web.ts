@@ -75,38 +75,28 @@ export function createWebNormalizedFingerprint(manifest: WebCaptureManifest): st
 export async function collectDiscordWebManifest(channel: ReleaseChannel): Promise<WebCaptureManifest> {
   const entryUrl = getDiscordWebEntryUrl(channel);
   const runtimeDiscovery = await collectDiscordWebRuntimeDiscovery(channel);
-  const runtimeDocument = selectRuntimeDocument(runtimeDiscovery.capture?.resources ?? [], entryUrl);
+  const capturedResources = runtimeDiscovery.capture?.resources ?? [];
+  const runtimeDocument = selectRuntimeDocument(capturedResources, entryUrl);
+
+  if (!runtimeDiscovery.capture || capturedResources.length === 0) {
+    throw new Error("live runtime capture produced no resources");
+  }
 
   if (!runtimeDocument) {
-    const fallbackDocument = await fetchWebDocument(entryUrl);
-    const fallbackHtml = decodeUtf8Body(fallbackDocument.body);
-    const fallbackAssetUrls = discoverWebAssetUrls(fallbackHtml, fallbackDocument.finalUrl);
-    const fallbackAssets = await Promise.all(fallbackAssetUrls.map(fetchWebAsset));
-
-    return {
-      assetUrls: fallbackAssetUrls,
-      assets: fallbackAssets,
-      buildNumber: extractWebBuildNumber(fallbackHtml),
-      channel,
-      document: fallbackDocument,
-      entryUrl,
-      runtimeDiscovery,
-    };
+    throw new Error(createMissingRuntimeDocumentError(runtimeDiscovery, capturedResources));
   }
 
   const html = decodeUtf8Body(runtimeDocument.body);
-  const runtimeAssets = collectRuntimeAssets(runtimeDiscovery.capture?.resources ?? [], runtimeDocument);
-  const fallbackAssetUrls = discoverWebAssetUrls(html, runtimeDocument.finalUrl);
-  const mergedAssets = await mergeRuntimeAndFallbackAssets(runtimeAssets, fallbackAssetUrls);
+  const runtimeAssets = collectRuntimeAssets(capturedResources, runtimeDocument);
   runtimeDiscovery.summary = summarizeRuntimeCapture(
-    runtimeDiscovery.capture?.resources ?? [],
+    capturedResources,
     runtimeDocument,
-    mergedAssets,
+    runtimeAssets,
   );
 
   return {
-    assetUrls: mergedAssets.map((asset) => asset.finalUrl),
-    assets: mergedAssets,
+    assetUrls: runtimeAssets.map((asset) => asset.finalUrl),
+    assets: runtimeAssets,
     buildNumber: extractWebBuildNumber(html),
     channel,
     document: runtimeDocument,
@@ -155,50 +145,6 @@ export async function createWebArtifactRecords(
   }
 
   return records;
-}
-
-async function fetchWebDocument(url: string): Promise<WebCapturedDocument> {
-  const response = await fetch(url, { headers: WEB_FETCH_HEADERS, redirect: "follow" });
-  const body = new Uint8Array(await response.arrayBuffer());
-
-  if (!response.ok) {
-    throw new Error(`web document request failed: ${response.status} ${response.url}`);
-  }
-
-  return {
-    body,
-    contentType: response.headers.get("content-type"),
-    finalUrl: response.url,
-    headers: Object.fromEntries(response.headers.entries()),
-    resourceType: "Document",
-    sha256: hashBuffer(body),
-    size: body.length,
-    status: response.status,
-    url,
-  };
-}
-
-async function fetchWebAsset(url: string): Promise<WebCapturedAsset> {
-  const response = await fetch(url, { headers: WEB_FETCH_HEADERS, redirect: "follow" });
-  const body = new Uint8Array(await response.arrayBuffer());
-
-  if (!response.ok) {
-    throw new Error(`web asset request failed: ${response.status} ${response.url}`);
-  }
-
-  return {
-    body,
-    contentType: response.headers.get("content-type"),
-    finalUrl: response.url,
-    headers: Object.fromEntries(response.headers.entries()),
-    kind: classifyWebArtifact(response.url, response.headers.get("content-type"), "Other"),
-    path: createWebArtifactPath(response.url),
-    resourceType: "Other",
-    sha256: hashBuffer(body),
-    size: body.length,
-    status: response.status,
-    url,
-  };
 }
 
 async function fetchBuffer(url: string): Promise<Uint8Array> {
@@ -418,20 +364,6 @@ function collectRuntimeAssets(resources: DevtoolsCapturedResource[], document: W
     .sort((left, right) => left.path.localeCompare(right.path));
 }
 
-async function mergeRuntimeAndFallbackAssets(runtimeAssets: WebCapturedAsset[], fallbackAssetUrls: string[]): Promise<WebCapturedAsset[]> {
-  const assetsByUrl = new Map(runtimeAssets.map((asset) => [asset.finalUrl, asset]));
-
-  for (const assetUrl of fallbackAssetUrls) {
-    if (assetsByUrl.has(assetUrl)) {
-      continue;
-    }
-
-    assetsByUrl.set(assetUrl, await fetchWebAsset(assetUrl));
-  }
-
-  return [...assetsByUrl.values()].sort((left, right) => left.path.localeCompare(right.path));
-}
-
 function summarizeRuntimeCapture(
   resources: DevtoolsCapturedResource[],
   document: WebCapturedDocument,
@@ -571,6 +503,24 @@ function discoverWebAssetUrls(html: string, baseUrl: string): string[] {
   }
 
   return [...assetUrls].sort();
+}
+
+function createMissingRuntimeDocumentError(
+  runtimeDiscovery: WebRuntimeDiscovery,
+  resources: DevtoolsCapturedResource[],
+): string {
+  const documentResources = resources.filter((resource) => resource.resourceType === "Document");
+  const documentUrls = documentResources
+    .slice(0, 5)
+    .map((resource) => `${resource.finalUrl} [bodyState=${resource.bodyState}]`)
+    .join(", ");
+
+  return [
+    "live runtime capture did not produce a usable document body",
+    `selected target: ${runtimeDiscovery.selectedTarget?.url ?? "none"}`,
+    `document resources: ${documentResources.length}`,
+    `examples: ${documentUrls || "none"}`,
+  ].join("; ");
 }
 
 function extractWebBuildNumber(html: string): string | null {
