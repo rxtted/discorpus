@@ -58,17 +58,14 @@ export async function runCollect(layer: CollectLayer, channel: ReleaseChannel, j
     };
     signals = collectDesktopSignals(desktopInstall, desktopManifest);
   } else {
-    if (!json) {
-      console.log("web capture: waiting for discord session to end...");
-    }
-    webManifest = await collectDiscordWebManifest(channel, (message) => {
+    const emitProgress = (message: string) => {
       if (!json) {
-        console.log(message);
+        console.log(`${formatProgressTimestamp(new Date())} ${message}`);
       }
-    });
-    if (!json) {
-      console.log("web capture: persisting captured blobs...");
-    }
+    };
+    emitProgress("web capture: waiting for discord session to end...");
+    webManifest = await collectDiscordWebManifest(channel, emitProgress);
+    emitProgress("web capture: creating artifact records...");
     webArtifactRecords = await createWebArtifactRecords(snapshot.id, snapshotStore, blobStore, webManifest);
     snapshot.release = {
       appVersion: webManifest.buildNumber ?? undefined,
@@ -120,10 +117,16 @@ export async function runCollect(layer: CollectLayer, channel: ReleaseChannel, j
 
   if (webManifest) {
     printWebManifest(webArtifactRecords, webManifest);
+    console.log(`${formatProgressTimestamp(new Date())} web capture: writing snapshot files...`);
     const snapshotDir = await persistWebSnapshot(snapshot, webManifest, webArtifactRecords, versionSet, dataDir);
+    console.log(`${formatProgressTimestamp(new Date())} web capture: indexing snapshot in sqlite...`);
     const dbPath = await persistSnapshotIndex(snapshot, webArtifactRecords, versionSet, dataDir);
     printCollectFooter(collectResult.status, snapshotDir, dbPath, dataDir);
   }
+}
+
+function formatProgressTimestamp(value: Date): string {
+  return value.toISOString().slice(11, 19);
 }
 
 function createCollectResult(

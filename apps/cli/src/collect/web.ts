@@ -82,7 +82,7 @@ export async function collectDiscordWebManifest(
 ): Promise<WebCaptureManifest> {
   const entryUrl = getDiscordWebEntryUrl(channel);
   const runtimeDiscovery = await collectDiscordWebRuntimeDiscovery(channel, onProgress);
-  onProgress?.("web capture: session ended, deriving snapshot assets...");
+  onProgress?.("web capture: session ended, selecting captured document...");
   const capturedResources = runtimeDiscovery.capture?.resources ?? [];
   const runtimeDocument = selectRuntimeDocument(capturedResources, entryUrl);
   const livePageDocument = runtimeDiscovery.capture?.pageDocument
@@ -99,13 +99,17 @@ export async function collectDiscordWebManifest(
   }
 
   const html = decodeUtf8Body(document.body);
+  onProgress?.("web capture: parsing bootstrap chunk manifest from html shell...");
   const bootstrapChunkManifest = parseBootstrapChunkManifest(html);
+  onProgress?.("web capture: promoting runtime-observed assets...");
   const { assets: runtimeAssets, excludedAssets, missedAssets, missedWebpackAssets } = await collectRuntimeAssets(capturedResources, document);
   onProgress?.("web capture: merging shell-declared assets...");
   const declaredAssets = await mergeDeclaredShellAssets(runtimeAssets, bootstrapChunkManifest, document.finalUrl);
+  onProgress?.("web capture: extracting runtime chunk maps from captured scripts...");
   const runtimeChunkManifest = extractRuntimeChunkManifest(declaredAssets);
   onProgress?.("web capture: deriving runtime-map assets...");
   const assets = await mergeRuntimeMapAssets(declaredAssets, runtimeChunkManifest, document.finalUrl);
+  onProgress?.("web capture: summarizing runtime coverage...");
   runtimeDiscovery.summary = summarizeRuntimeCapture(
     capturedResources,
     document,
@@ -239,22 +243,14 @@ async function collectRuntimeCaptureSession(
   let pageDocument: NonNullable<NonNullable<WebRuntimeDiscovery["capture"]>["pageDocument"]> | null = null;
   let selectedTarget: DevtoolsTargetInfo | null = null;
   let observedTarget = false;
-  let devtoolsUnavailableSince: number | null = null;
 
   while (true) {
     let targets: DevtoolsTargetInfo[] = [];
 
     try {
       targets = await listDevtoolsTargets(baseUrl);
-      devtoolsUnavailableSince = null;
     } catch {
-      if (observedTarget) {
-        devtoolsUnavailableSince ??= Date.now();
-
-        if (Date.now() - devtoolsUnavailableSince >= 5000) {
-          break;
-        }
-      } else if (!isChildRunning(child)) {
+      if (!isChildRunning(child)) {
         break;
       }
 
@@ -269,7 +265,7 @@ async function collectRuntimeCaptureSession(
     const nextTarget = pickNextRuntimeCaptureTarget(targets, attachedTargetIds);
 
     if (!nextTarget?.webSocketDebuggerUrl) {
-      if (observedTarget && !isChildRunning(child) && targets.length === 0) {
+      if (!isChildRunning(child)) {
         break;
       }
 
