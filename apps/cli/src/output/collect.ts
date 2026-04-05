@@ -4,12 +4,9 @@ import type { CliArtifactRecord, DesktopAsarExtraction, WebCaptureManifest } fro
 import { countKinds, formatArtifactCounts, formatCorpusSummary } from "../shared.js";
 
 export interface CollectHeaderOptions {
-  channel: string;
   corpusVersionId: string;
-  layer: string;
   snapshotId: string;
   snapshotKey: string;
-  status: string;
   upstreamSummary: string;
 }
 
