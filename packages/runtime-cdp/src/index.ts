@@ -59,8 +59,15 @@ export interface CaptureDevtoolsNetworkOptions {
   reloadOnAttach?: boolean;
 }
 
+export interface DevtoolsPageDocument {
+  contentType: string | null;
+  finalUrl: string;
+  html: string;
+}
+
 export interface DevtoolsNetworkCapture {
   finishedAt: string;
+  pageDocument: DevtoolsPageDocument | null;
   quietPeriodMs: number;
   resources: DevtoolsCapturedResource[];
   startedAt: string;
@@ -188,6 +195,7 @@ export async function captureDevtoolsNetwork(
   const pendingBodies = new Set<Promise<void>>();
   const startedAt = new Date().toISOString();
   let lastActivityAt = Date.now();
+  let pageDocument: DevtoolsPageDocument | null = null;
 
   const unsubscribe = connection.onEvent((method, params) => {
     lastActivityAt = Date.now();
@@ -328,11 +336,14 @@ export async function captureDevtoolsNetwork(
   try {
     await connection.send("Page.enable");
     await connection.send("Network.enable");
+    await connection.send("Runtime.enable");
     await connection.send("Network.setCacheDisabled", { cacheDisabled: true });
 
     if (options.reloadOnAttach !== false) {
       await connection.send("Page.reload", { ignoreCache: true });
     }
+
+    pageDocument = await capturePageDocument(connection).catch(() => null);
 
     if (captureUntilClose) {
       await connection.waitUntilClosed();
@@ -358,6 +369,7 @@ export async function captureDevtoolsNetwork(
 
   return {
     finishedAt: new Date().toISOString(),
+    pageDocument,
     quietPeriodMs,
     resources: [...resources.values()].sort((left, right) => left.finalUrl.localeCompare(right.finalUrl)),
     startedAt,
@@ -527,6 +539,14 @@ interface PendingCommand {
   resolve: (value: unknown) => void;
 }
 
+interface RuntimeEvaluateResult {
+  result?: {
+    subtype?: string;
+    type?: string;
+    value?: unknown;
+  };
+}
+
 interface MinimalWebSocket {
   addEventListener(
     type: string,
@@ -573,6 +593,39 @@ function shouldCaptureBody(resource: MutableCapturedResource): boolean {
     contentType.includes("font/") ||
     contentType.includes("wasm") ||
     contentType.includes("octet-stream");
+}
+
+async function capturePageDocument(connection: CdpConnection): Promise<DevtoolsPageDocument | null> {
+  const response = await connection.send<RuntimeEvaluateResult>("Runtime.evaluate", {
+    awaitPromise: false,
+    expression: `(() => {
+      const doc = globalThis.document;
+      const loc = globalThis.location;
+      if (!doc || !loc) {
+        return null;
+      }
+      return {
+        contentType: typeof doc.contentType === "string" ? doc.contentType : null,
+        finalUrl: String(loc.href),
+        html: doc.documentElement ? doc.documentElement.outerHTML : "",
+      };
+    })()`,
+    returnByValue: true,
+  });
+
+  const value = asRecord(response.result?.value);
+  const finalUrl = asString(value.finalUrl);
+  const html = asString(value.html);
+
+  if (!finalUrl || html === null) {
+    return null;
+  }
+
+  return {
+    contentType: asString(value.contentType),
+    finalUrl,
+    html,
+  };
 }
 
 function decodeBody(value: string, base64Encoded: boolean): Uint8Array {
