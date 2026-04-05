@@ -18,6 +18,7 @@ import type {
   WebCaptureManifest,
   WebCapturedAsset,
   WebCapturedDocument,
+  WebExcludedAsset,
   WebMissedAsset,
   WebRuntimeDiscovery,
   WebRuntimeSummary,
@@ -92,10 +93,11 @@ export async function collectDiscordWebManifest(channel: ReleaseChannel): Promis
   }
 
   const html = decodeUtf8Body(document.body);
-  const { assets: runtimeAssets, missedAssets } = await collectRuntimeAssets(capturedResources, document);
+  const { assets: runtimeAssets, excludedAssets, missedAssets } = await collectRuntimeAssets(capturedResources, document);
   runtimeDiscovery.summary = summarizeRuntimeCapture(
     capturedResources,
     document,
+    excludedAssets,
     runtimeAssets,
     missedAssets,
   );
@@ -107,6 +109,7 @@ export async function collectDiscordWebManifest(channel: ReleaseChannel): Promis
     channel,
     document,
     entryUrl,
+    excludedAssets,
     missedAssets,
     runtimeDiscovery,
   };
@@ -413,12 +416,25 @@ function createCapturedDocumentFromPage(pageDocument: NonNullable<NonNullable<We
 async function collectRuntimeAssets(
   resources: DevtoolsCapturedResource[],
   document: WebCapturedDocument,
-): Promise<{ assets: WebCapturedAsset[]; missedAssets: WebMissedAsset[] }> {
+): Promise<{ assets: WebCapturedAsset[]; excludedAssets: WebExcludedAsset[]; missedAssets: WebMissedAsset[] }> {
   const trustedOrigins = createTrustedDiscordOrigins(document.finalUrl);
   const assetsByPath = new Map<string, WebCapturedAsset>();
+  const excludedAssets: WebExcludedAsset[] = [];
   const missedAssets: WebMissedAsset[] = [];
 
   for (const resource of resources) {
+    if (isExcludedContentResource(resource)) {
+      excludedAssets.push({
+        contentType: resource.contentType,
+        finalUrl: resource.finalUrl,
+        path: createWebArtifactPath(resource.finalUrl),
+        reason: "user_or_content_media",
+        resourceType: resource.resourceType,
+        status: resource.status,
+      });
+      continue;
+    }
+
     if (!isPromotableDiscordResource(resource, trustedOrigins, document.finalUrl)) {
       continue;
     }
@@ -469,6 +485,7 @@ async function collectRuntimeAssets(
 
   return {
     assets: [...assetsByPath.values()].sort((left, right) => left.path.localeCompare(right.path)),
+    excludedAssets: dedupeExcludedAssets(excludedAssets),
     missedAssets: missedAssets.sort((left, right) => left.path.localeCompare(right.path)),
   };
 }
@@ -476,6 +493,7 @@ async function collectRuntimeAssets(
 function summarizeRuntimeCapture(
   resources: DevtoolsCapturedResource[],
   document: WebCapturedDocument,
+  excludedAssets: WebExcludedAsset[],
   promotedAssets: WebCapturedAsset[],
   missedAssets: WebMissedAsset[],
 ): WebRuntimeSummary {
@@ -522,6 +540,7 @@ function summarizeRuntimeCapture(
     capturedResourceCount: resources.length,
     capturedWithBodyCount,
     contentTypeFamilies: sortCountMap(contentTypeFamilies),
+    excludedAssetCount: excludedAssets.length,
     missedAssetCount: missedAssets.length,
     origins: sortCountMap(origins),
     promotableResourceCount,
@@ -777,8 +796,6 @@ function decodeUtf8Body(body: Uint8Array | undefined): string {
 function createTrustedDiscordOrigins(documentUrl: string): Set<string> {
   const origins = new Set<string>([
     "https://discord.com",
-    "https://cdn.discordapp.com",
-    "https://media.discordapp.net",
   ]);
 
   try {
@@ -788,6 +805,31 @@ function createTrustedDiscordOrigins(documentUrl: string): Set<string> {
   }
 
   return origins;
+}
+
+function isExcludedContentResource(resource: DevtoolsCapturedResource): boolean {
+  let parsedUrl: URL;
+
+  try {
+    parsedUrl = new URL(resource.finalUrl);
+  } catch {
+    return false;
+  }
+
+  if (parsedUrl.origin !== "https://cdn.discordapp.com" && parsedUrl.origin !== "https://media.discordapp.net") {
+    return false;
+  }
+
+  const pathname = parsedUrl.pathname.toLowerCase();
+
+  return pathname.startsWith("/app-assets/") ||
+    pathname.startsWith("/app-icons/") ||
+    pathname.startsWith("/avatar-decoration-presets/") ||
+    pathname.startsWith("/avatars/") ||
+    pathname.startsWith("/guild-icons/") ||
+    pathname.startsWith("/channel-icons/") ||
+    pathname.startsWith("/role-icons/") ||
+    pathname.startsWith("/embed/avatars/");
 }
 
 async function recoverPromotableResourceBody(resource: DevtoolsCapturedResource): Promise<Uint8Array | null> {
@@ -859,6 +901,18 @@ function shouldReplacePromotedAsset(current: WebCapturedAsset, candidate: WebCap
 }
 
 const EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
+function dedupeExcludedAssets(assets: WebExcludedAsset[]): WebExcludedAsset[] {
+  const assetsByPath = new Map<string, WebExcludedAsset>();
+
+  for (const asset of assets) {
+    if (!assetsByPath.has(asset.path)) {
+      assetsByPath.set(asset.path, asset);
+    }
+  }
+
+  return [...assetsByPath.values()].sort((left, right) => left.path.localeCompare(right.path));
+}
 
 function countAssetKinds(assets: WebCapturedAsset[]): Record<string, number> {
   const counts: Record<string, number> = {};
