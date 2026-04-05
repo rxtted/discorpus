@@ -3,6 +3,7 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
 import type { ArtifactRecord, CorpusVersionRecord, SnapshotRecord, UpstreamVersionRecord, VersionDecision } from "@discorpus/core";
+import { createSnapshotDirName } from "@discorpus/storage";
 
 export interface DbPaths {
   databasePath: string;
@@ -158,6 +159,49 @@ export function getSnapshotById(
     `).get(snapshotId);
 
     return ((row as unknown) as SnapshotLookupRow | undefined) ?? null;
+  } finally {
+    database.close();
+  }
+}
+
+export function getSnapshotByIdOrDirName(
+  databasePath: string,
+  value: string,
+): SnapshotLookupRow | null {
+  const byId = getSnapshotById(databasePath, value);
+
+  if (byId) {
+    return byId;
+  }
+
+  const database = new DatabaseSync(databasePath);
+
+  try {
+    const rows = database.prepare(`
+      select
+        id,
+        target,
+        channel,
+        platform,
+        layer,
+        observed_at,
+        app_version,
+        release_id,
+        upstream_version_id,
+        corpus_version_id,
+        is_new_upstream_version,
+        is_new_corpus_version
+      from snapshots
+      order by observed_at desc
+    `).all();
+
+    for (const row of rows as unknown as SnapshotLookupRow[]) {
+      if (createSnapshotDirName(row.id) === value) {
+        return row;
+      }
+    }
+
+    return null;
   } finally {
     database.close();
   }

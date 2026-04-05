@@ -16,6 +16,7 @@
     "check": "tsc -b --pretty false"
   },
   "dependencies": {
-    "@discorpus/core": "workspace:*"
+    "@discorpus/core": "workspace:*",
+    "@discorpus/storage": "workspace:*"
   }
 }

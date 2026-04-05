@@ -1,7 +1,7 @@
 import path from "node:path";
 
 import { formatSnapshotKey, type CorpusLayer, type ReleaseChannel, type VersionSignal } from "@discorpus/core";
-import { ensureCorpusDatabase, getArtifactKindCounts, getLatestSnapshot, getSnapshotById, indexSnapshot } from "@discorpus/db";
+import { ensureCorpusDatabase, getArtifactKindCounts, getLatestSnapshot, getSnapshotByIdOrDirName, indexSnapshot } from "@discorpus/db";
 import {
   collectWindowsDesktopManifest,
   discoverWindowsDesktopInstall,
@@ -192,7 +192,7 @@ async function runInspectLatest(layer: CollectLayer, channel: ReleaseChannel, js
 
 async function runInspectSnapshot(snapshotId: string, json: boolean): Promise<void> {
   const db = await ensureCorpusDatabase(path.join(process.cwd(), "data"));
-  const snapshot = getSnapshotById(db.databasePath, snapshotId);
+  const snapshot = getSnapshotByIdOrDirName(db.databasePath, snapshotId);
 
   if (!snapshot) {
     console.error(`snapshot not found: ${snapshotId}`);

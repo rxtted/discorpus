@@ -84,6 +84,10 @@ export async function createSnapshotPaths(baseDir: string, snapshotId: string): 
   };
 }
 
+export function createSnapshotDirName(snapshotId: string): string {
+  return buildSnapshotDirName(snapshotId);
+}
+
 export async function writeJsonFile(filePath: string, value: unknown): Promise<void> {
   await mkdir(path.dirname(filePath), { recursive: true });
   await writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
@@ -102,7 +106,7 @@ function toSafePathSegment(value: string): string {
   return value.replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_");
 }
 
-function createSnapshotDirName(snapshotId: string): string {
+function buildSnapshotDirName(snapshotId: string): string {
   const parts = snapshotId.split(":");
   const target = parts[0] ?? "snapshot";
   const channel = parts[1] ?? "unknown";
