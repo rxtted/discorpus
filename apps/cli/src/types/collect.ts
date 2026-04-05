@@ -63,6 +63,7 @@ export interface WebCaptureManifest {
 }
 
 export interface WebRuntimeSummary {
+  bodyStates: Record<string, number>;
   capturedResourceCount: number;
   capturedWithBodyCount: number;
   contentTypeFamilies: Record<string, number>;

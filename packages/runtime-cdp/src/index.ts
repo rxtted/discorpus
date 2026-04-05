@@ -38,6 +38,8 @@ export interface DevtoolsBodyResult {
 }
 
 export interface DevtoolsCapturedResource {
+  bodyError: string | null;
+  bodyState: "captured" | "failed" | "missing" | "pending" | "skipped";
   contentType: string | null;
   encodedDataLength: number | null;
   finalUrl: string;
@@ -203,6 +205,8 @@ export async function captureDevtoolsNetwork(
 
       resources.set(requestId, {
         body: existing?.body ?? null,
+        bodyError: existing?.bodyError ?? null,
+        bodyState: existing?.bodyState ?? "missing",
         contentType: existing?.contentType ?? null,
         encodedDataLength: existing?.encodedDataLength ?? null,
         finalUrl: requestUrl,
@@ -229,6 +233,8 @@ export async function captureDevtoolsNetwork(
 
       resources.set(requestId, {
         body: existing?.body ?? null,
+        bodyError: existing?.bodyError ?? null,
+        bodyState: existing?.bodyState ?? "missing",
         contentType: asString(response.mimeType) ?? null,
         encodedDataLength: existing?.encodedDataLength ?? null,
         finalUrl: responseUrl,
@@ -259,8 +265,13 @@ export async function captureDevtoolsNetwork(
       resources.set(requestId, existing);
 
       if (!shouldCaptureBody(existing)) {
+        existing.bodyState = "skipped";
+        resources.set(requestId, existing);
         return;
       }
+
+      existing.bodyState = "pending";
+      resources.set(requestId, existing);
 
       const pendingBody = connection
         .send<{ base64Encoded?: boolean; body?: string }>("Network.getResponseBody", { requestId })
@@ -273,10 +284,20 @@ export async function captureDevtoolsNetwork(
 
           const body = decodeBody(result.body, result.base64Encoded === true);
           resource.body = body;
+          resource.bodyError = null;
+          resource.bodyState = "captured";
           resources.set(requestId, resource);
         })
-        .catch(() => {
-          // some requests do not expose bodies through cdP; ignore and keep metadata
+        .catch((error: unknown) => {
+          const resource = resources.get(requestId);
+
+          if (!resource) {
+            return;
+          }
+
+          resource.bodyError = error instanceof Error ? error.message : String(error);
+          resource.bodyState = "failed";
+          resources.set(requestId, resource);
         })
         .finally(() => {
           pendingBodies.delete(pendingBody);
@@ -517,11 +538,27 @@ interface MinimalWebSocket {
 }
 
 function shouldCaptureBody(resource: MutableCapturedResource): boolean {
-  if (resource.status !== null && resource.status >= 400) {
+  if (resource.status === null || resource.status < 200 || resource.status >= 400) {
     return false;
   }
 
-  if (resource.resourceType === "Document" || resource.resourceType === "Script" || resource.resourceType === "Stylesheet" || resource.resourceType === "XHR" || resource.resourceType === "Fetch") {
+  if (resource.resourceType === "Preflight" || resource.resourceType === "WebSocket" || resource.resourceType === "EventSource" || resource.resourceType === "Manifest") {
+    return false;
+  }
+
+  if (resource.finalUrl.startsWith("data:") || resource.finalUrl.startsWith("blob:")) {
+    return false;
+  }
+
+  if (resource.resourceType === "Document" ||
+    resource.resourceType === "Script" ||
+    resource.resourceType === "Stylesheet" ||
+    resource.resourceType === "XHR" ||
+    resource.resourceType === "Fetch" ||
+    resource.resourceType === "Image" ||
+    resource.resourceType === "Font" ||
+    resource.resourceType === "Media" ||
+    resource.resourceType === "Other") {
     return true;
   }
 
@@ -531,7 +568,11 @@ function shouldCaptureBody(resource: MutableCapturedResource): boolean {
     contentType.includes("json") ||
     contentType.includes("css") ||
     contentType.includes("html") ||
-    contentType.includes("text");
+    contentType.includes("text") ||
+    contentType.includes("image/") ||
+    contentType.includes("font/") ||
+    contentType.includes("wasm") ||
+    contentType.includes("octet-stream");
 }
 
 function decodeBody(value: string, base64Encoded: boolean): Uint8Array {

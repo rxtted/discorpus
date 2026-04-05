@@ -123,6 +123,8 @@ function serializeRuntimeDiscovery(runtimeDiscovery: WebCaptureManifest["runtime
           finishedAt: runtimeDiscovery.capture.finishedAt,
           quietPeriodMs: runtimeDiscovery.capture.quietPeriodMs,
           resources: runtimeDiscovery.capture.resources.map((resource: DevtoolsCapturedResource) => ({
+            bodyError: resource.bodyError,
+            bodyState: resource.bodyState,
             contentType: resource.contentType,
             encodedDataLength: resource.encodedDataLength,
             finalUrl: resource.finalUrl,

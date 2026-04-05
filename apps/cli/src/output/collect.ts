@@ -93,10 +93,18 @@ export function printWebManifest(records: CliArtifactRecord[], manifest: WebCapt
       console.log(`web runtime same-origin with body: ${manifest.runtimeDiscovery.summary.sameOriginWithBodyCount}`);
       console.log(`web runtime promotable resources: ${manifest.runtimeDiscovery.summary.promotableResourceCount}`);
       console.log(`web promoted assets: ${manifest.runtimeDiscovery.summary.promotedAssetCount}`);
+      console.log(`web runtime body states: ${formatCountRecord(manifest.runtimeDiscovery.summary.bodyStates)}`);
     }
   }
 
   for (const asset of manifest.assets.slice(0, 12)) {
     console.log(`asset ${asset.kind}: ${asset.path} ${asset.sha256}`);
   }
+}
+
+function formatCountRecord(counts: Record<string, number>): string {
+  return Object.entries(counts)
+    .sort((left, right) => left[0].localeCompare(right[0]))
+    .map(([name, count]) => `${name}=${count}`)
+    .join(", ");
 }

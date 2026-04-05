@@ -440,6 +440,7 @@ function summarizeRuntimeCapture(
   const documentOrigin = new URL(document.finalUrl).origin;
   const contentTypeFamilies: Record<string, number> = {};
   const origins: Record<string, number> = {};
+  const bodyStates: Record<string, number> = {};
   const resourceTypes: Record<string, number> = {};
   let capturedWithBodyCount = 0;
   let promotableResourceCount = 0;
@@ -449,6 +450,7 @@ function summarizeRuntimeCapture(
   for (const resource of resources) {
     const resourceType = resource.resourceType || "unknown";
     resourceTypes[resourceType] = (resourceTypes[resourceType] ?? 0) + 1;
+    bodyStates[resource.bodyState] = (bodyStates[resource.bodyState] ?? 0) + 1;
 
     const contentTypeFamily = getContentTypeFamily(resource.contentType);
     contentTypeFamilies[contentTypeFamily] = (contentTypeFamilies[contentTypeFamily] ?? 0) + 1;
@@ -474,6 +476,7 @@ function summarizeRuntimeCapture(
   }
 
   return {
+    bodyStates: sortCountMap(bodyStates),
     capturedResourceCount: resources.length,
     capturedWithBodyCount,
     contentTypeFamilies: sortCountMap(contentTypeFamilies),
