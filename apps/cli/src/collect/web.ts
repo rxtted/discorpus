@@ -4,6 +4,7 @@ import path from "node:path";
 
 import type { ReleaseChannel, VersionSignal } from "@discorpus/core";
 import {
+  captureBrowserDevtoolsNetwork,
   captureDevtoolsNetwork,
   listDevtoolsTargets,
   waitForDevtoolsVersion,
@@ -212,7 +213,7 @@ async function collectDiscordWebRuntimeDiscovery(
 
   try {
     const version = await waitForDevtoolsVersion(devtoolsBaseUrl, { timeoutMs: 15000 });
-    const session = await collectRuntimeCaptureSession(devtoolsBaseUrl, child, onProgress);
+    const session = await collectRuntimeCaptureSession(devtoolsBaseUrl, version.webSocketDebuggerUrl, child, onProgress);
     completed = true;
 
     return {
@@ -234,93 +235,28 @@ async function collectDiscordWebRuntimeDiscovery(
 
 async function collectRuntimeCaptureSession(
   baseUrl: string,
+  browserWebSocketDebuggerUrl: string | null,
   child: ChildProcess,
   onProgress?: (message: string) => void,
 ): Promise<Pick<WebRuntimeDiscovery, "capture" | "selectedTarget" | "targets">> {
-  const resources = new Map<string, DevtoolsCapturedResource>();
-  const seenTargets = new Map<string, DevtoolsTargetInfo>();
-  const attachedTargetIds = new Set<string>();
-  let captureFinishedAt = new Date().toISOString();
-  let captureStartedAt: string | null = null;
-  let pageDocument: NonNullable<NonNullable<WebRuntimeDiscovery["capture"]>["pageDocument"]> | null = null;
-  let selectedTarget: DevtoolsTargetInfo | null = null;
-  let observedTarget = false;
-
-  while (true) {
-    let targets: DevtoolsTargetInfo[] = [];
-
-    try {
-      targets = await listDevtoolsTargets(baseUrl);
-    } catch {
-      if (!isChildRunning(child)) {
-        break;
-      }
-
-      await sleep(500);
-      continue;
-    }
-
-    for (const target of targets) {
-      seenTargets.set(target.id, target);
-    }
-
-    const nextTarget = pickNextRuntimeCaptureTarget(targets, attachedTargetIds);
-
-    if (!nextTarget?.webSocketDebuggerUrl) {
-      if (!isChildRunning(child)) {
-        break;
-      }
-
-      await sleep(500);
-      continue;
-    }
-
-    observedTarget = true;
-    attachedTargetIds.add(nextTarget.id);
-    onProgress?.(`web capture: attached target ${nextTarget.type} ${nextTarget.url || nextTarget.id}`);
-
-    if (!selectedTarget || isRemoteDiscordTarget(nextTarget)) {
-      selectedTarget = nextTarget;
-    }
-
-    const capture = await captureDevtoolsNetwork(nextTarget.webSocketDebuggerUrl, {
-      captureUntilClose: true,
-      onProgress: (progress) => {
-        onProgress?.(
-          `web capture: live resources=${progress.resourceCount} bodies=${progress.bodyCapturedCount} pending=${progress.bodyPendingCount} failed=${progress.bodyFailedCount} skipped=${progress.bodySkippedCount}`,
-        );
-      },
-      reloadOnAttach: false,
-    });
-    onProgress?.(`web capture: target closed ${nextTarget.url || nextTarget.id}, resources=${capture.resources.length}`);
-
-    if (!captureStartedAt) {
-      captureStartedAt = capture.startedAt;
-    }
-
-    captureFinishedAt = capture.finishedAt;
-    pageDocument = pickPreferredPageDocument(pageDocument, capture.pageDocument, selectedTarget);
-
-    for (const resource of capture.resources) {
-      resources.set(`${nextTarget.id}:${resource.requestId}`, {
-        ...resource,
-        requestId: `${nextTarget.id}:${resource.requestId}`,
-      });
-    }
+  if (!browserWebSocketDebuggerUrl) {
+    throw new Error("browser-level devtools websocket is unavailable");
   }
 
+  const capture = await captureBrowserDevtoolsNetwork(browserWebSocketDebuggerUrl, {
+    childIsRunning: () => isChildRunning(child),
+    onProgress: (progress) => {
+      onProgress?.(
+        `web capture: live resources=${progress.resourceCount} bodies=${progress.bodyCapturedCount} pending=${progress.bodyPendingCount} failed=${progress.bodyFailedCount} skipped=${progress.bodySkippedCount} active_targets=${progress.activeTargets}`,
+      );
+    },
+    targetFilter: (target) => target.type === "page" && (target.url.startsWith("file:") || isRemoteDiscordTarget(target)),
+  });
+
   return {
-    capture: captureStartedAt
-      ? {
-          finishedAt: captureFinishedAt,
-          pageDocument,
-          quietPeriodMs: 0,
-          resources: [...resources.values()].sort((left, right) => left.finalUrl.localeCompare(right.finalUrl)),
-          startedAt: captureStartedAt,
-        }
-      : null,
-    selectedTarget,
-    targets: [...seenTargets.values()],
+    capture,
+    selectedTarget: capture.selectedTarget,
+    targets: capture.targets,
   };
 }
 
