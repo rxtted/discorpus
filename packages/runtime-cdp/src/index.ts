@@ -87,6 +87,7 @@ export interface DevtoolsNetworkCapture {
 export interface CaptureBrowserDevtoolsNetworkOptions {
   childIsRunning?: () => boolean;
   onProgress?: (progress: DevtoolsCaptureProgress & { activeTargets: number }) => void;
+  processExitGraceMs?: number;
   targetFilter?: (target: DevtoolsTargetInfo) => boolean;
 }
 
@@ -448,9 +449,11 @@ export async function captureBrowserDevtoolsNetwork(
 ): Promise<DevtoolsNetworkCapture> {
   const connection = await createCdpConnection(browserWebSocketDebuggerUrl);
   const startedAt = new Date().toISOString();
+  const processExitGraceMs = options.processExitGraceMs ?? 3000;
   const sessions = new Map<string, BrowserCaptureSession>();
   const targets = new Map<string, DevtoolsTargetInfo>();
   let lastProgressAt = 0;
+  let lastRelevantActivityAt = Date.now();
   let selectedTarget: DevtoolsTargetInfo | null = null;
 
   const isRelevantTarget = (target: DevtoolsTargetInfo): boolean => {
@@ -523,6 +526,7 @@ export async function captureBrowserDevtoolsNetwork(
       sessions.set(attachedSessionId, {
         closed: false,
         initialized: false,
+        lastActivityAt: Date.now(),
         pageDocument: null,
         pendingBodies: new Set<Promise<void>>(),
         relevant,
@@ -533,6 +537,7 @@ export async function captureBrowserDevtoolsNetwork(
 
       if (relevant && (!selectedTarget || isBetterSelectedTarget(targetInfo, selectedTarget))) {
         selectedTarget = targetInfo;
+        lastRelevantActivityAt = Date.now();
       }
 
       void initializeAttachedTarget(connection, attachedSessionId, sessions, emitProgress);
@@ -559,9 +564,12 @@ export async function captureBrowserDevtoolsNetwork(
 
         if (session.relevant && (!selectedTarget || isBetterSelectedTarget(targetInfo, selectedTarget))) {
           selectedTarget = targetInfo;
+          lastRelevantActivityAt = Date.now();
         }
 
         if (!wasRelevant && session.relevant) {
+          session.lastActivityAt = Date.now();
+          lastRelevantActivityAt = Date.now();
           void initializeAttachedTarget(connection, session.sessionId, sessions, emitProgress);
         }
       }
@@ -581,6 +589,7 @@ export async function captureBrowserDevtoolsNetwork(
 
       if (session) {
         session.closed = true;
+        session.lastActivityAt = Date.now();
       }
 
       emitProgress();
@@ -597,6 +606,8 @@ export async function captureBrowserDevtoolsNetwork(
       return;
     }
 
+    session.lastActivityAt = Date.now();
+    lastRelevantActivityAt = Date.now();
     handleSessionNetworkEvent(connection, session, method, params, emitProgress);
   });
 
@@ -633,8 +644,9 @@ export async function captureBrowserDevtoolsNetwork(
     while (true) {
       const running = options.childIsRunning ? options.childIsRunning() : true;
       const activeRelevantSessions = [...sessions.values()].some((session) => session.relevant && !session.closed);
+      const inactiveAfterExit = !running && Date.now() - lastRelevantActivityAt >= processExitGraceMs;
 
-      if (!running && !activeRelevantSessions) {
+      if (!running && (!activeRelevantSessions || inactiveAfterExit)) {
         break;
       }
 
@@ -719,6 +731,7 @@ interface MutableCapturedResource extends DevtoolsCapturedResource {}
 interface BrowserCaptureSession {
   closed: boolean;
   initialized: boolean;
+  lastActivityAt: number;
   pageDocument: DevtoolsPageDocument | null;
   pendingBodies: Set<Promise<void>>;
   relevant: boolean;
