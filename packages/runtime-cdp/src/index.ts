@@ -522,6 +522,7 @@ export async function captureBrowserDevtoolsNetwork(
       const relevant = isRelevantTarget(targetInfo);
       sessions.set(attachedSessionId, {
         closed: false,
+        initialized: false,
         pageDocument: null,
         pendingBodies: new Set<Promise<void>>(),
         relevant,
@@ -534,7 +535,7 @@ export async function captureBrowserDevtoolsNetwork(
         selectedTarget = targetInfo;
       }
 
-      void initializeAttachedTarget(connection, attachedSessionId, relevant, sessions, emitProgress);
+      void initializeAttachedTarget(connection, attachedSessionId, sessions, emitProgress);
       return;
     }
 
@@ -552,11 +553,16 @@ export async function captureBrowserDevtoolsNetwork(
           continue;
         }
 
+        const wasRelevant = session.relevant;
         session.target = targetInfo;
         session.relevant = isRelevantTarget(targetInfo);
 
         if (session.relevant && (!selectedTarget || isBetterSelectedTarget(targetInfo, selectedTarget))) {
           selectedTarget = targetInfo;
+        }
+
+        if (!wasRelevant && session.relevant) {
+          void initializeAttachedTarget(connection, session.sessionId, sessions, emitProgress);
         }
       }
 
@@ -712,6 +718,7 @@ interface MutableCapturedResource extends DevtoolsCapturedResource {}
 
 interface BrowserCaptureSession {
   closed: boolean;
+  initialized: boolean;
   pageDocument: DevtoolsPageDocument | null;
   pendingBodies: Set<Promise<void>>;
   relevant: boolean;
@@ -939,26 +946,28 @@ async function capturePageDocument(connection: CdpConnection): Promise<DevtoolsP
 async function initializeAttachedTarget(
   connection: CdpConnection,
   sessionId: string,
-  relevant: boolean,
   sessions: Map<string, BrowserCaptureSession>,
   emitProgress: (force?: boolean) => void,
 ): Promise<void> {
-  if (!relevant) {
-    return;
-  }
-
-  await connection.send("Page.enable", {}, sessionId);
-  await connection.send("Network.enable", {}, sessionId);
-  await connection.send("Runtime.enable", {}, sessionId);
-  await connection.send("Network.setCacheDisabled", { cacheDisabled: true }, sessionId);
-
   const session = sessions.get(sessionId);
 
-  if (!session) {
+  if (!session || session.initialized || !session.relevant) {
     return;
   }
 
-  session.pageDocument = await capturePageDocumentForSession(connection, sessionId).catch(() => null);
+  session.initialized = true;
+
+  try {
+    await connection.send("Page.enable", {}, sessionId);
+    await connection.send("Network.enable", {}, sessionId);
+    await connection.send("Runtime.enable", {}, sessionId);
+    await connection.send("Network.setCacheDisabled", { cacheDisabled: true }, sessionId);
+    session.pageDocument = await capturePageDocumentForSession(connection, sessionId).catch(() => null);
+  } catch {
+    session.initialized = false;
+    return;
+  }
+
   emitProgress();
 }
 
