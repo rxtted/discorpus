@@ -79,7 +79,15 @@ export interface DevtoolsNetworkCapture {
   pageDocument: DevtoolsPageDocument | null;
   quietPeriodMs: number;
   resources: DevtoolsCapturedResource[];
+  selectedTarget: DevtoolsTargetInfo | null;
+  targets: DevtoolsTargetInfo[];
   startedAt: string;
+}
+
+export interface CaptureBrowserDevtoolsNetworkOptions {
+  childIsRunning?: () => boolean;
+  onProgress?: (progress: DevtoolsCaptureProgress & { activeTargets: number }) => void;
+  targetFilter?: (target: DevtoolsTargetInfo) => boolean;
 }
 
 export async function getDevtoolsVersion(baseUrl: string): Promise<DevtoolsVersionInfo> {
@@ -428,7 +436,239 @@ export async function captureDevtoolsNetwork(
     pageDocument,
     quietPeriodMs,
     resources: [...resources.values()].sort((left, right) => left.finalUrl.localeCompare(right.finalUrl)),
+    selectedTarget: null,
     startedAt,
+    targets: [],
+  };
+}
+
+export async function captureBrowserDevtoolsNetwork(
+  browserWebSocketDebuggerUrl: string,
+  options: CaptureBrowserDevtoolsNetworkOptions = {},
+): Promise<DevtoolsNetworkCapture> {
+  const connection = await createCdpConnection(browserWebSocketDebuggerUrl);
+  const startedAt = new Date().toISOString();
+  const sessions = new Map<string, BrowserCaptureSession>();
+  const targets = new Map<string, DevtoolsTargetInfo>();
+  let lastProgressAt = 0;
+  let selectedTarget: DevtoolsTargetInfo | null = null;
+
+  const isRelevantTarget = (target: DevtoolsTargetInfo): boolean => {
+    if (target.type !== "page") {
+      return false;
+    }
+
+    return options.targetFilter ? options.targetFilter(target) : true;
+  };
+
+  const emitProgress = (force = false) => {
+    if (!options.onProgress) {
+      return;
+    }
+
+    const now = Date.now();
+
+    if (!force && now - lastProgressAt < 2000) {
+      return;
+    }
+
+    lastProgressAt = now;
+    let resourceCount = 0;
+    let bodyCapturedCount = 0;
+    let bodyFailedCount = 0;
+    let bodyPendingCount = 0;
+    let bodySkippedCount = 0;
+
+    for (const session of sessions.values()) {
+      if (!session.relevant) {
+        continue;
+      }
+
+      resourceCount += session.resources.size;
+
+      for (const resource of session.resources.values()) {
+        if (resource.bodyState === "captured") {
+          bodyCapturedCount += 1;
+        } else if (resource.bodyState === "failed") {
+          bodyFailedCount += 1;
+        } else if (resource.bodyState === "pending") {
+          bodyPendingCount += 1;
+        } else if (resource.bodyState === "skipped") {
+          bodySkippedCount += 1;
+        }
+      }
+    }
+
+    options.onProgress({
+      activeTargets: [...sessions.values()].filter((session) => session.relevant && !session.closed).length,
+      bodyCapturedCount,
+      bodyFailedCount,
+      bodyPendingCount,
+      bodySkippedCount,
+      resourceCount,
+    });
+  };
+
+  const unsubscribe = connection.onEvent((method, params, sessionId) => {
+    if (method === "Target.attachedToTarget") {
+      const targetInfo = toTargetInfo(asRecord(params.targetInfo));
+      const attachedSessionId = asString(params.sessionId);
+
+      if (!targetInfo || !attachedSessionId) {
+        return;
+      }
+
+      targets.set(targetInfo.id, targetInfo);
+      const relevant = isRelevantTarget(targetInfo);
+      sessions.set(attachedSessionId, {
+        closed: false,
+        pageDocument: null,
+        pendingBodies: new Set<Promise<void>>(),
+        relevant,
+        resources: new Map<string, MutableCapturedResource>(),
+        sessionId: attachedSessionId,
+        target: targetInfo,
+      });
+
+      if (relevant && (!selectedTarget || isBetterSelectedTarget(targetInfo, selectedTarget))) {
+        selectedTarget = targetInfo;
+      }
+
+      void initializeAttachedTarget(connection, attachedSessionId, relevant, sessions, emitProgress);
+      return;
+    }
+
+    if (method === "Target.targetInfoChanged") {
+      const targetInfo = toTargetInfo(asRecord(params.targetInfo));
+
+      if (!targetInfo) {
+        return;
+      }
+
+      targets.set(targetInfo.id, targetInfo);
+
+      for (const session of sessions.values()) {
+        if (session.target.id !== targetInfo.id) {
+          continue;
+        }
+
+        session.target = targetInfo;
+        session.relevant = isRelevantTarget(targetInfo);
+
+        if (session.relevant && (!selectedTarget || isBetterSelectedTarget(targetInfo, selectedTarget))) {
+          selectedTarget = targetInfo;
+        }
+      }
+
+      emitProgress();
+      return;
+    }
+
+    if (method === "Target.detachedFromTarget") {
+      const detachedSessionId = asString(params.sessionId);
+
+      if (!detachedSessionId) {
+        return;
+      }
+
+      const session = sessions.get(detachedSessionId);
+
+      if (session) {
+        session.closed = true;
+      }
+
+      emitProgress();
+      return;
+    }
+
+    if (!sessionId) {
+      return;
+    }
+
+    const session = sessions.get(sessionId);
+
+    if (!session || !session.relevant) {
+      return;
+    }
+
+    handleSessionNetworkEvent(connection, session, method, params, emitProgress);
+  });
+
+  try {
+    await connection.send("Target.setDiscoverTargets", { discover: true });
+    await connection.send("Target.setAutoAttach", {
+      autoAttach: true,
+      flatten: true,
+      waitForDebuggerOnStart: false,
+    });
+
+    const result = await connection.send<{ targetInfos?: unknown[] }>("Target.getTargets");
+    const targetInfos = Array.isArray(result.targetInfos) ? result.targetInfos : [];
+
+    for (const rawTargetInfo of targetInfos) {
+      const targetInfo = toTargetInfo(asRecord(rawTargetInfo));
+
+      if (!targetInfo || !isRelevantTarget(targetInfo)) {
+        continue;
+      }
+
+      targets.set(targetInfo.id, targetInfo);
+
+      try {
+        await connection.send("Target.attachToTarget", {
+          flatten: true,
+          targetId: targetInfo.id,
+        });
+      } catch {
+        continue;
+      }
+    }
+
+    while (true) {
+      const running = options.childIsRunning ? options.childIsRunning() : true;
+      const activeRelevantSessions = [...sessions.values()].some((session) => session.relevant && !session.closed);
+
+      if (!running && !activeRelevantSessions) {
+        break;
+      }
+
+      emitProgress();
+      await sleep(250);
+    }
+
+    const pendingBodies = [...sessions.values()].flatMap((session) => [...session.pendingBodies]);
+
+    if (pendingBodies.length > 0) {
+      await Promise.allSettled(pendingBodies);
+    }
+
+    emitProgress(true);
+  } finally {
+    unsubscribe();
+    await connection.close();
+  }
+
+  const mergedResources = [...sessions.values()]
+    .filter((session) => session.relevant)
+    .flatMap((session) =>
+      [...session.resources.values()].map((resource) => ({
+        ...resource,
+        requestId: `${session.target.id}:${resource.requestId}`,
+      })),
+    )
+    .sort((left, right) => left.finalUrl.localeCompare(right.finalUrl));
+  const pageDocument = [...sessions.values()]
+    .filter((session): session is BrowserCaptureSession & { pageDocument: DevtoolsPageDocument } => session.relevant && session.pageDocument !== null)
+    .sort((left, right) => scorePageDocument(left.pageDocument, selectedTarget) > scorePageDocument(right.pageDocument, selectedTarget) ? -1 : 1)[0]?.pageDocument ?? null;
+
+  return {
+    finishedAt: new Date().toISOString(),
+    pageDocument,
+    quietPeriodMs: 0,
+    resources: mergedResources,
+    selectedTarget,
+    startedAt,
+    targets: [...targets.values()],
   };
 }
 
@@ -470,10 +710,20 @@ async function sleep(ms: number): Promise<void> {
 
 interface MutableCapturedResource extends DevtoolsCapturedResource {}
 
+interface BrowserCaptureSession {
+  closed: boolean;
+  pageDocument: DevtoolsPageDocument | null;
+  pendingBodies: Set<Promise<void>>;
+  relevant: boolean;
+  resources: Map<string, MutableCapturedResource>;
+  sessionId: string;
+  target: DevtoolsTargetInfo;
+}
+
 interface CdpConnection {
   close(): Promise<void>;
-  onEvent(handler: (method: string, params: Record<string, unknown>) => void): () => void;
-  send<T>(method: string, params?: Record<string, unknown>): Promise<T>;
+  onEvent(handler: (method: string, params: Record<string, unknown>, sessionId?: string) => void): () => void;
+  send<T>(method: string, params?: Record<string, unknown>, sessionId?: string): Promise<T>;
   waitUntilClosed(): Promise<void>;
 }
 
@@ -486,7 +736,7 @@ async function createCdpConnection(webSocketDebuggerUrl: string): Promise<CdpCon
 
   const socket = new WebSocketCtor(webSocketDebuggerUrl);
   const pending = new Map<number, PendingCommand>();
-  const eventHandlers = new Set<(method: string, params: Record<string, unknown>) => void>();
+  const eventHandlers = new Set<(method: string, params: Record<string, unknown>, sessionId?: string) => void>();
   let nextId = 1;
   let closed = false;
   let resolveClosed: (() => void) | null = null;
@@ -534,8 +784,10 @@ async function createCdpConnection(webSocketDebuggerUrl: string): Promise<CdpCon
     if (message.method) {
       const params = asRecord(message.params);
 
+      const sessionId = asString((message as { sessionId?: unknown }).sessionId) ?? undefined;
+
       for (const handler of eventHandlers) {
-        handler(message.method, params);
+        handler(message.method, params, sessionId);
       }
     }
   });
@@ -563,14 +815,14 @@ async function createCdpConnection(webSocketDebuggerUrl: string): Promise<CdpCon
         socket.close();
       });
     },
-    onEvent(handler: (method: string, params: Record<string, unknown>) => void): () => void {
+    onEvent(handler: (method: string, params: Record<string, unknown>, sessionId?: string) => void): () => void {
       eventHandlers.add(handler);
 
       return () => {
         eventHandlers.delete(handler);
       };
     },
-    send<T>(method: string, params?: Record<string, unknown>): Promise<T> {
+    send<T>(method: string, params?: Record<string, unknown>, sessionId?: string): Promise<T> {
       const id = nextId;
       nextId += 1;
 
@@ -580,7 +832,7 @@ async function createCdpConnection(webSocketDebuggerUrl: string): Promise<CdpCon
           reject,
           resolve: (value) => resolve(value as T),
         });
-        socket.send(JSON.stringify({ id, method, params }));
+        socket.send(JSON.stringify({ id, method, params, sessionId }));
       });
     },
     waitUntilClosed(): Promise<void> {
@@ -683,6 +935,286 @@ async function capturePageDocument(connection: CdpConnection): Promise<DevtoolsP
     html,
   };
 }
+
+async function initializeAttachedTarget(
+  connection: CdpConnection,
+  sessionId: string,
+  relevant: boolean,
+  sessions: Map<string, BrowserCaptureSession>,
+  emitProgress: (force?: boolean) => void,
+): Promise<void> {
+  if (!relevant) {
+    return;
+  }
+
+  await connection.send("Page.enable", {}, sessionId);
+  await connection.send("Network.enable", {}, sessionId);
+  await connection.send("Runtime.enable", {}, sessionId);
+  await connection.send("Network.setCacheDisabled", { cacheDisabled: true }, sessionId);
+
+  const session = sessions.get(sessionId);
+
+  if (!session) {
+    return;
+  }
+
+  session.pageDocument = await capturePageDocumentForSession(connection, sessionId).catch(() => null);
+  emitProgress();
+}
+
+function handleSessionNetworkEvent(
+  connection: CdpConnection,
+  session: BrowserCaptureSession,
+  method: string,
+  params: Record<string, unknown>,
+  emitProgress: (force?: boolean) => void,
+): void {
+  if (method === "Network.requestWillBeSent") {
+    const requestId = asString(params.requestId);
+
+    if (!requestId) {
+      return;
+    }
+
+    const existing = session.resources.get(requestId);
+    const request = asRecord(params.request);
+    const requestUrl = asString(request.url) ?? existing?.url ?? "";
+
+    session.resources.set(requestId, {
+      body: existing?.body ?? null,
+      bodyError: existing?.bodyError ?? null,
+      bodyState: existing?.bodyState ?? "missing",
+      contentType: existing?.contentType ?? null,
+      encodedDataLength: existing?.encodedDataLength ?? null,
+      finalUrl: requestUrl,
+      fromDiskCache: existing?.fromDiskCache ?? false,
+      headers: existing?.headers ?? {},
+      requestId,
+      resourceType: asString(params.type) ?? existing?.resourceType ?? "other",
+      status: existing?.status ?? null,
+      url: requestUrl,
+    });
+    emitProgress();
+    return;
+  }
+
+  if (method === "Network.responseReceived") {
+    const requestId = asString(params.requestId);
+
+    if (!requestId) {
+      return;
+    }
+
+    const existing = session.resources.get(requestId);
+    const response = asRecord(params.response);
+    const responseUrl = asString(response.url) ?? existing?.finalUrl ?? existing?.url ?? "";
+
+    session.resources.set(requestId, {
+      body: existing?.body ?? null,
+      bodyError: existing?.bodyError ?? null,
+      bodyState: existing?.bodyState ?? "missing",
+      contentType: asString(response.mimeType) ?? null,
+      encodedDataLength: existing?.encodedDataLength ?? null,
+      finalUrl: responseUrl,
+      fromDiskCache: asBoolean(response.fromDiskCache),
+      headers: asHeaders(response.headers),
+      requestId,
+      resourceType: asString(params.type) ?? existing?.resourceType ?? "other",
+      status: asNumber(response.status),
+      url: existing?.url ?? responseUrl,
+    });
+    emitProgress();
+    return;
+  }
+
+  if (method === "Network.loadingFinished") {
+    const requestId = asString(params.requestId);
+
+    if (!requestId) {
+      return;
+    }
+
+    const existing = session.resources.get(requestId);
+
+    if (!existing) {
+      return;
+    }
+
+    existing.encodedDataLength = asNumber(params.encodedDataLength);
+    session.resources.set(requestId, existing);
+
+    if (!shouldCaptureBody(existing)) {
+      existing.bodyState = "skipped";
+      session.resources.set(requestId, existing);
+      emitProgress();
+      return;
+    }
+
+    existing.bodyState = "pending";
+    session.resources.set(requestId, existing);
+    emitProgress();
+
+    const pendingBody = connection
+      .send<{ base64Encoded?: boolean; body?: string }>("Network.getResponseBody", { requestId }, session.sessionId)
+      .then((result) => {
+        const resource = session.resources.get(requestId);
+
+        if (!resource || typeof result.body !== "string") {
+          return;
+        }
+
+        resource.body = decodeBody(result.body, result.base64Encoded === true);
+        resource.bodyError = null;
+        resource.bodyState = "captured";
+        session.resources.set(requestId, resource);
+        emitProgress();
+      })
+      .catch((error: unknown) => {
+        const resource = session.resources.get(requestId);
+
+        if (!resource) {
+          return;
+        }
+
+        resource.bodyError = error instanceof Error ? error.message : String(error);
+        resource.bodyState = "failed";
+        session.resources.set(requestId, resource);
+        emitProgress();
+      })
+      .finally(() => {
+        session.pendingBodies.delete(pendingBody);
+      });
+
+    session.pendingBodies.add(pendingBody);
+    return;
+  }
+
+  if (method === "Network.requestServedFromCache") {
+    const requestId = asString(params.requestId);
+
+    if (!requestId) {
+      return;
+    }
+
+    const existing = session.resources.get(requestId);
+
+    if (!existing) {
+      return;
+    }
+
+    existing.fromDiskCache = true;
+    session.resources.set(requestId, existing);
+    emitProgress();
+  }
+}
+
+async function capturePageDocumentForSession(connection: CdpConnection, sessionId: string): Promise<DevtoolsPageDocument | null> {
+  const response = await connection.send<RuntimeEvaluateResult>("Runtime.evaluate", {
+    awaitPromise: false,
+    expression: `(() => {
+      const doc = globalThis.document;
+      const loc = globalThis.location;
+      if (!doc || !loc) {
+        return null;
+      }
+      return {
+        contentType: typeof doc.contentType === "string" ? doc.contentType : null,
+        finalUrl: String(loc.href),
+        html: doc.documentElement ? doc.documentElement.outerHTML : "",
+      };
+    })()`,
+    returnByValue: true,
+  }, sessionId);
+
+  const value = asRecord(response.result?.value);
+  const finalUrl = asString(value.finalUrl);
+  const html = asString(value.html);
+
+  if (!finalUrl || html === null) {
+    return null;
+  }
+
+  return {
+    contentType: asString(value.contentType),
+    finalUrl,
+    html,
+  };
+}
+
+function toTargetInfo(target: Record<string, unknown>): DevtoolsTargetInfo | null {
+  const id = asString(target.targetId) ?? asString(target.id);
+  const type = asString(target.type);
+
+  if (!id || !type) {
+    return null;
+  }
+
+  return {
+    attached: asBoolean(target.attached),
+    browserContextId: asString(target.browserContextId) ?? undefined,
+    description: asString(target.description) ?? "",
+    devtoolsFrontendUrl: asString(target.devtoolsFrontendUrl) ?? "",
+    faviconUrl: asString(target.faviconUrl) ?? undefined,
+    id,
+    parentId: asString(target.parentId) ?? undefined,
+    title: asString(target.title) ?? "",
+    type,
+    url: asString(target.url) ?? "",
+    webSocketDebuggerUrl: asString(target.webSocketDebuggerUrl),
+  };
+}
+
+function isBetterSelectedTarget(candidate: DevtoolsTargetInfo, current: DevtoolsTargetInfo): boolean {
+  if (isRemoteDiscordUrl(candidate.url) && !isRemoteDiscordUrl(current.url)) {
+    return true;
+  }
+
+  if (isRemoteDiscordUrl(candidate.url) === isRemoteDiscordUrl(current.url)) {
+    return candidate.url.localeCompare(current.url) < 0;
+  }
+
+  return false;
+}
+
+function scorePageDocument(
+  pageDocument: DevtoolsPageDocument,
+  selectedTarget: DevtoolsTargetInfo | null,
+): number {
+  let score = 0;
+
+  if (isRemoteDiscordUrl(pageDocument.finalUrl)) {
+    score += 100;
+  }
+
+  if (selectedTarget && isSameOrigin(pageDocument.finalUrl, selectedTarget.url)) {
+    score += 25;
+  }
+
+  if (pageDocument.contentType?.toLowerCase().includes("html")) {
+    score += 10;
+  }
+
+  if (!pageDocument.finalUrl.startsWith("file:")) {
+    score += 5;
+  }
+
+  return score;
+}
+
+function isRemoteDiscordUrl(url: string): boolean {
+  return url.startsWith("https://discord.com") ||
+    url.startsWith("https://ptb.discord.com") ||
+    url.startsWith("https://canary.discord.com");
+}
+
+function isSameOrigin(left: string, right: string): boolean {
+  try {
+    return new URL(left).origin === new URL(right).origin;
+  } catch {
+    return false;
+  }
+}
+
 
 function decodeBody(value: string, base64Encoded: boolean): Uint8Array {
   if (base64Encoded) {
